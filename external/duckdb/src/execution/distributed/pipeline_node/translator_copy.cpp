@@ -15,7 +15,7 @@ namespace distributed {
 namespace {
 
 DistributedCopySpec BuildCopyToFileSpecForTranslator(const duckdb::PhysicalCopyToFile &op) {
-	if (!op.function.copy_to_get_written_statistics) {
+	if (!op.single_commit_writer && !op.function.copy_to_get_written_statistics) {
 		throw NotImplementedException("Distributed COPY requires copy_to_get_written_statistics for format \"%s\"",
 		                              op.function.name);
 	}
@@ -24,7 +24,7 @@ DistributedCopySpec BuildCopyToFileSpecForTranslator(const duckdb::PhysicalCopyT
 	}
 
 	DistributedCopySpec spec;
-	spec.type = DistributedCopyType::COPY_TO_FILE;
+	spec.type = op.single_commit_writer ? DistributedCopyType::SINGLE_COMMIT_WRITER : DistributedCopyType::COPY_TO_FILE;
 	spec.function = op.function;
 	spec.bind_data = op.bind_data->Copy();
 	spec.file_path = op.file_path;
@@ -33,6 +33,7 @@ DistributedCopySpec BuildCopyToFileSpecForTranslator(const duckdb::PhysicalCopyT
 	spec.file_extension = op.file_extension;
 	spec.overwrite_mode = op.overwrite_mode;
 	spec.parallel = op.parallel;
+	spec.task_cpu_slots = op.task_cpu_slots;
 	spec.per_thread_output = op.per_thread_output;
 	spec.file_size_bytes = op.file_size_bytes;
 	spec.rotate = op.rotate;
@@ -81,7 +82,14 @@ PipelineNodeRef RequiredCopyChildImpl(const std::vector<std::shared_ptr<Distribu
 
 std::shared_ptr<PipelineNodeImpl> PhysicalPlanToPipelineNodeTranslator::TranslateCopyToFile(
     const PhysicalCopyToFile &op, const std::vector<std::shared_ptr<DistributedPipelineNode>> &children) {
-	auto child_impl = RequiredCopyChildImpl(children);
+	auto child = children.empty() ? nullptr : children[0];
+	if (!child) {
+		throw NotImplementedException("Distributed COPY requires a child operator");
+	}
+	if (op.single_commit_writer) {
+		child = gen_gather_node(std::move(child));
+	}
+	auto child_impl = child->inner();
 	auto copy_sink =
 	    std::make_shared<CopySinkNode>(get_next_pipeline_node_id(), child_impl, BuildCopyToFileSpecForTranslator(op));
 	return std::make_shared<CopyFinishNode>(get_next_pipeline_node_id(), copy_sink);

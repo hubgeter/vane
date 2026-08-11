@@ -43,7 +43,19 @@ _duckdb_set_default(DUCKDB_SOURCE_PATH
                     "${CMAKE_CURRENT_SOURCE_DIR}/external/duckdb")
 
 # Extension list - commonly used extensions for Python
-_duckdb_set_default(BUILD_EXTENSIONS "core_functions;parquet;icu;json;httpfs")
+_duckdb_set_default(BUILD_EXTENSIONS
+                    "core_functions;parquet;icu;json;httpfs;lance")
+
+# lance-duckdb is directly vendored next to the DuckDB fork rather than below
+# DuckDB's extension tree. Register that source directory before DuckDB creates
+# extension targets; no network fetch or second DuckDB checkout is involved.
+set(_VANE_LANCE_EXTENSION_CONFIG
+    "${CMAKE_CURRENT_LIST_DIR}/lance_extension_config.cmake")
+list(FIND DUCKDB_EXTENSION_CONFIGS "${_VANE_LANCE_EXTENSION_CONFIG}"
+     _VANE_LANCE_EXTENSION_CONFIG_INDEX)
+if(_VANE_LANCE_EXTENSION_CONFIG_INDEX EQUAL -1)
+  list(APPEND DUCKDB_EXTENSION_CONFIGS "${_VANE_LANCE_EXTENSION_CONFIG}")
+endif()
 
 # Core build options - disable unnecessary components for Python builds
 _duckdb_set_default(BUILD_SHELL OFF)
@@ -659,9 +671,25 @@ function(duckdb_add_library target_name)
   _duckdb_resolve_fork_version()
   _duckdb_print_summary()
 
+  # DuckDB resolves BUILD_EXTENSIONS as in-tree names before it reads custom
+  # extension configs.  Temporarily remove Lance so our config can register its
+  # explicit vendored SOURCE_DIR, then restore the name for final static linking
+  # by duckdb_link_extensions().
+  list(FIND BUILD_EXTENSIONS "lance" _VANE_LANCE_BUILD_EXTENSION_INDEX)
+  if(NOT _VANE_LANCE_BUILD_EXTENSION_INDEX EQUAL -1)
+    list(REMOVE_ITEM BUILD_EXTENSIONS "lance")
+    set(_VANE_LINK_LANCE_EXTENSION TRUE)
+  else()
+    set(_VANE_LINK_LANCE_EXTENSION FALSE)
+  endif()
+
   # Add DuckDB subdirectory - it will use our variables
   add_subdirectory("${DUCKDB_SOURCE_PATH}" duckdb EXCLUDE_FROM_ALL)
   _duckdb_enable_identity_refresh()
+
+  if(_VANE_LINK_LANCE_EXTENSION)
+    list(APPEND BUILD_EXTENSIONS "lance")
+  endif()
 
   # Create clean interface target
   _duckdb_create_interface_target(${target_name})

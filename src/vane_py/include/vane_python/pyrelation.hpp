@@ -258,6 +258,12 @@ public:
 	           const py::object &use_tmp_file = py::none(), const py::object &partition_by = py::none(),
 	           const py::object &write_partition_columns = py::none());
 
+	void ToLance(const string &uri, const string &mode = "create", uint64_t max_rows_per_file = 1024ULL * 1024ULL,
+	             uint64_t max_rows_per_group = 1024ULL,
+	             uint64_t max_bytes_per_file = 90ULL * 1024ULL * 1024ULL * 1024ULL,
+	             const string &data_storage_version = "2.2");
+	void AttachLanceSnapshotLease(py::object lease);
+
 	// should this return a rel with the new view?
 	unique_ptr<DuckDBPyRelation> CreateView(const string &view_name, bool replace = true);
 

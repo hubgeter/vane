@@ -13670,7 +13670,7 @@ def test_configure_duckdb_s3_applies_static_credentials_only_to_connection_conte
     statements = []
 
     class _FakeConnection:
-        def execute(self, statement):
+        def execute(self, statement, parameters=None):
             statements.append(statement)
 
     worker_mod._configure_duckdb_s3(
@@ -13692,7 +13692,7 @@ def test_configure_duckdb_s3_does_not_install_httpfs_when_load_fails():
     statements = []
 
     class _FakeConnection:
-        def execute(self, statement):
+        def execute(self, statement, parameters=None):
             statements.append(statement)
             raise RuntimeError("httpfs is unavailable")
 
@@ -13711,10 +13711,12 @@ def test_configure_duckdb_s3_does_not_install_httpfs_when_load_fails():
 
 def test_configure_duckdb_s3_preserves_scheme_less_endpoint_authority():
     statements = []
+    parameter_sets = []
 
     class _FakeConnection:
-        def execute(self, statement):
+        def execute(self, statement, parameters=None):
             statements.append(statement)
+            parameter_sets.append(parameters)
 
     worker_mod._configure_duckdb_s3(
         _FakeConnection(),
@@ -13723,6 +13725,16 @@ def test_configure_duckdb_s3_preserves_scheme_less_endpoint_authority():
 
     assert "SET s3_endpoint='minio.internal:9000'" in statements
     assert "SET s3_use_ssl=false" in statements
+    lance_secret_index = next(
+        index for index, statement in enumerate(statements) if "TEMPORARY SECRET vane_lance_session" in statement
+    )
+    assert parameter_sets[lance_secret_index] == [
+        {
+            "endpoint": "http://minio.internal:9000",
+            "virtual_hosted_style_request": "false",
+            "allow_http": "true",
+        }
+    ]
 
 
 @pytest.mark.parametrize(
@@ -13743,7 +13755,7 @@ def test_configure_duckdb_s3_resolves_session_credential_chain_outside_shared_wo
     resolver_calls = []
 
     class _FakeConnection:
-        def execute(self, statement):
+        def execute(self, statement, parameters=None):
             statements.append(statement)
 
     def _resolve(config):
@@ -13954,7 +13966,7 @@ def test_explicit_duckdb_credentials_skip_profile_resolution_and_discard_cached_
     statements = []
 
     class _FakeConnection:
-        def execute(self, statement):
+        def execute(self, statement, parameters=None):
             statements.append(statement)
 
     effective = worker_mod._refresh_effective_duckdb_s3_config(

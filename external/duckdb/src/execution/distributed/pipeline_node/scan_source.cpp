@@ -15,6 +15,10 @@ namespace distributed {
 
 namespace {
 
+void SetTaskCpuSlots(std::unordered_map<std::string, std::string> &context, const ScanTaskDescriptor &descriptor) {
+	context["task_cpu_slots"] = std::to_string(std::max<idx_t>(1, descriptor.cpu_slots));
+}
+
 size_t ResolveScanTaskSubmissionBacklog(size_t scan_task_count, const DuckDBExecutionConfigRef &exec_cfg) {
 	if (scan_task_count == 0) {
 		return 1;
@@ -71,7 +75,10 @@ SubmittableTaskStream<WorkerTask> ScanSourceNode::produce_tasks(PlanExecutionCon
 
 			TaskContext tctx =
 			    TaskContext::from_node_context(self->context().query_idx(), self->node_id(), task_id_counter.next());
-			WorkerTask task(tctx, self->scan_plan_, self->config().execution_config(), self->context().to_hashmap());
+			auto context = self->context().to_hashmap();
+			auto descriptor = ScanTaskDescriptor::DeserializeFromBytes((*injected_input_ptr)->scan_task_bytes);
+			SetTaskCpuSlots(context, descriptor);
+			WorkerTask task(tctx, self->scan_plan_, self->config().execution_config(), std::move(context));
 			task.mutable_inputs()[static_cast<SourceNodeId>(self->node_id())] =
 			    TaskInput::make_scan_task((*injected_input_ptr)->scan_task_bytes);
 			auto r = tx_ptr->send(SubmittableTask<WorkerTask>(std::move(task)));
@@ -113,6 +120,7 @@ SubmittableTaskStream<WorkerTask> ScanSourceNode::produce_tasks(PlanExecutionCon
 			TaskContext tctx =
 			    TaskContext::from_node_context(self->context().query_idx(), self->node_id(), task_id_counter.next());
 			auto context = self->context().to_hashmap();
+			SetTaskCpuSlots(context, descriptor);
 
 			WorkerTask task(tctx, self->scan_plan_, self->config().execution_config(), std::move(context));
 			// Populate inputs_ for SourceId-based routing (analogous to Vane's Input::ScanTask)

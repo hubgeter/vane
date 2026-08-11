@@ -81,6 +81,18 @@ def _memory_requirement_from_request(
     return int(default_bytes)
 
 
+def _task_cpu_slots_from_request(request: Mapping[str, Any]) -> int:
+    context = request.get("context")
+    raw_value = context.get("task_cpu_slots", 1) if isinstance(context, Mapping) else 1
+    try:
+        slots = int(raw_value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"invalid FTE task CPU-slot requirement {raw_value!r}") from exc
+    if slots <= 0:
+        raise ValueError("FTE task CPU-slot requirement must be positive")
+    return slots
+
+
 def _has_explicit_memory_requirement(request: Mapping[str, Any]) -> bool:
     if any(request.get(key) is not None for key in ("memory_requirement_bytes", "required_memory_bytes")):
         return True
@@ -155,7 +167,11 @@ def _safe_exception_traceback(exc: BaseException) -> str:
         return f"{type(exc).__name__}: {_safe_failure_message(exc)}\n"
 
 
-def _failure_payload_from_exception(exc: BaseException) -> dict[str, Any]:
+def _failure_payload_from_exception(
+    exc: BaseException,
+    *,
+    retryable_override: bool | None = None,
+) -> dict[str, Any]:
     retryable: bool | None = None
     if _failure_exception_matches(exc, (DuckDBMemoryLimitError,)):
         error_code = "MEMORY_LIMIT_CONFIGURATION_FAILED"
@@ -165,6 +181,8 @@ def _failure_payload_from_exception(exc: BaseException) -> dict[str, Any]:
     else:
         error_code = "GENERIC_INTERNAL_ERROR"
     payload = _failure_payload(error_code, exc)
+    if retryable_override is not None:
+        retryable = retryable_override
     if retryable is not None:
         payload["retryable"] = retryable
     payload.update(
@@ -361,6 +379,7 @@ class FteTaskExecution:
             if leased_memory_bytes is not None
             else _memory_requirement_from_request(self.request, default_task_memory_bytes)
         )
+        self.cpu_slots = _task_cpu_slots_from_request(self.request)
 
     def _create_dynamic_source_queues(self, expected_kind: str, source_ids: set[str]) -> dict[str, Any]:
         if not source_ids:
@@ -726,9 +745,16 @@ class FteTaskExecution:
                     failure=_task_canceled_failure_payload(self.task_id),
                 )
             else:
+                context = self.request.get("context")
+                single_commit_started = isinstance(context, Mapping) and str(
+                    context.get("single_commit_writer_started", "")
+                ).strip().lower() in {"1", "true", "yes", "on"}
                 self._transition(
                     FteTaskState.FAILED,
-                    failure=_failure_payload_from_exception(exc),
+                    failure=_failure_payload_from_exception(
+                        exc,
+                        retryable_override=False if single_commit_started else None,
+                    ),
                 )
 
     def _complete_dynamic_source_splits(self) -> None:
@@ -1271,12 +1297,27 @@ class FteWorkerTaskManager:
             total += int(execution.memory_requirement_bytes)
         return total
 
+    def _execution_cpu_slots(self, execution: FteTaskExecution) -> int:
+        slots = max(1, int(execution.cpu_slots))
+        if self.max_running_tasks is not None:
+            slots = min(slots, int(self.max_running_tasks))
+        return slots
+
+    def _running_cpu_slots(self) -> int:
+        return sum(
+            self._execution_cpu_slots(execution)
+            for key in self.running_tasks
+            if (execution := self.tasks.get(key)) is not None
+        )
+
     def _has_capacity(self, execution: FteTaskExecution | None = None) -> bool:
         return not self._capacity_block_reason(execution)
 
     def _capacity_block_reason(self, execution: FteTaskExecution | None = None) -> str:
-        if self.max_running_tasks is not None and len(self.running_tasks) >= self.max_running_tasks:
-            return "max_running_tasks"
+        if self.max_running_tasks is not None:
+            required_slots = 1 if execution is None else self._execution_cpu_slots(execution)
+            if self._running_cpu_slots() + required_slots > int(self.max_running_tasks):
+                return "max_running_tasks"
         if execution is None:
             return ""
         running_memory = self._running_memory_requirement_bytes()
@@ -1338,6 +1379,7 @@ class FteWorkerTaskManager:
     def _executor_stats(self, task_key: str | None = None) -> dict[str, Any]:
         stats: dict[str, Any] = {
             "executor_running_task_count": len(self.running_tasks),
+            "executor_running_cpu_slots": self._running_cpu_slots(),
             "executor_queued_task_count": len(self.queued_tasks),
             "executor_max_running_tasks": self.max_running_tasks,
             "executor_admission_limited": self.max_running_tasks is not None,
@@ -1356,6 +1398,7 @@ class FteWorkerTaskManager:
             execution = self.tasks.get(task_key)
             if execution is not None:
                 stats["executor_task_memory_requirement_bytes"] = execution.memory_requirement_bytes
+                stats["executor_task_cpu_slots"] = self._execution_cpu_slots(execution)
         return stats
 
     def _status_with_executor(self, execution: FteTaskExecution) -> dict[str, Any]:

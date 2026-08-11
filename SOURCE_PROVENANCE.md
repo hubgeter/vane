@@ -8,6 +8,7 @@ The repository also contains substantial code derived from projects with compati
 | --- | --- | --- |
 | Vane-specific code under `vane/` and distributed execution changes | Vane contributors | Apache-2.0 by default |
 | `external/duckdb/` | `duckdb/duckdb` plus Vane-maintained engine customizations | DuckDB MIT license plus the licenses retained in its vendored directories |
+| `external/lance-duckdb/` | `lance-format/lance-duckdb` commit `63c2446f7d9c8a59fd73a49fededb0c3725cc192`, with its DuckDB and extension tooling gitlinks excluded | Apache-2.0; exact archive hashes and Vane-local build changes are recorded in `external/lance-duckdb/VENDORING.md` |
 | DuckDB-derived modules and stubs moved under `vane/`, plus `src/vane_py/` | Derived from DuckDB's Python client and subsequently modified for Vane | Original DuckDB portions remain MIT; Vane contributions are Apache-2.0 |
 | Tests and benchmarks derived from DuckDB or other named suites | Their named upstream source | License noted in the source directory or `THIRD_PARTY.md` |
 
@@ -16,6 +17,16 @@ The repository also contains substantial code derived from projects with compati
 New Vane source files use an `Apache-2.0` SPDX identifier. Parent-repository files that combine inherited DuckDB or DuckDB Python client source with Vane modifications use `MIT AND Apache-2.0` and retain both copyright notices. New and modified source in `external/duckdb` remains under that repository's MIT license.
 
 Existing third-party headers are preserved. Unchanged upstream source, vendored dependencies, and generated output are not mechanically relabeled. Run `python3 scripts/check_source_license_headers.py` from the repository root to validate the applicable files.
+
+The Lance SQL extension is imported directly under `external/lance-duckdb`
+from `https://github.com/lance-format/lance-duckdb.git` at immutable commit
+`63c2446f7d9c8a59fd73a49fededb0c3725cc192`. Its upstream `duckdb` entry is an
+official DuckDB gitlink, not a Lance-maintained fork, and is deliberately not
+imported. The `extension-ci-tools` gitlink and `.gitmodules` are likewise
+excluded. Vane builds the retained Lance-owned C++, Rust, tests, documentation,
+benchmarks, and helper scripts directly from Git and links only a static
+extension against `external/duckdb`. See `external/lance-duckdb/VENDORING.md`
+for the canonical archive hash and the complete local-delta inventory.
 
 The DuckDB engine is imported under `external/duckdb` as a squashed Git subtree
 from `https://github.com/duckdb/duckdb.git`. Subtree metadata records the exact

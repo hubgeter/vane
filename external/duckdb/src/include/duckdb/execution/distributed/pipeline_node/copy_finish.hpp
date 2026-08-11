@@ -65,6 +65,37 @@ public:
 	/// Returns the aggregated copy result.
 	DuckDBResult<DistributedCopyResult> finalize(const std::vector<ResultPartitionRef> &partitions,
 	                                             ClientContext &context) {
+		if (spec().IsSingleCommitWriter()) {
+			DistributedCopyResult result;
+			for (auto &part : partitions) {
+				auto collection_ref = part ? part->to_column_data() : nullptr;
+				if (!collection_ref) {
+					return DuckDBResult<DistributedCopyResult>::err(
+					    DuckDBError("single-commit COPY expects tabular ResultPartition results"));
+				}
+				ColumnDataScanState scan_state;
+				collection_ref->InitializeScan(scan_state);
+				DataChunk chunk;
+				collection_ref->InitializeScanChunk(chunk);
+				while (collection_ref->Scan(scan_state, chunk)) {
+					if (chunk.ColumnCount() != 1) {
+						return DuckDBResult<DistributedCopyResult>::err(
+						    DuckDBError("single-commit COPY result schema mismatch"));
+					}
+					for (idx_t row = 0; row < chunk.size(); row++) {
+						auto count = chunk.GetValue(0, row);
+						if (!count.IsNull()) {
+							result.rows_copied += static_cast<idx_t>(count.GetValue<int64_t>());
+						}
+					}
+				}
+			}
+			result.output_base_path = spec().file_path;
+			result.output_run_id = staging_run_id();
+			result.output_direct_write = true;
+			result.output_committed = true;
+			return DuckDBResult<DistributedCopyResult>::ok(std::move(result));
+		}
 		// Step 1: parse worker output fragments → file infos
 		auto file_infos_res = ParseCopyPartitions(partitions);
 		if (file_infos_res.is_err()) {

@@ -41,11 +41,65 @@
 #include "duckdb/parser/expression/columnref_expression.hpp"
 #include "duckdb/parser/query_node/select_node.hpp"
 #include "duckdb/parser/statement/select_statement.hpp"
+#include "duckdb/parser/statement/copy_statement.hpp"
+#include "duckdb/planner/binder.hpp"
 #include "vane_python/pybind11/gil_wrapper.hpp"
 
 #include <algorithm>
 
 namespace duckdb {
+
+class WriteLanceRelation final : public Relation {
+public:
+	WriteLanceRelation(shared_ptr<Relation> child_p, string uri_p, case_insensitive_map_t<vector<Value>> options_p)
+	    : Relation(child_p->context, RelationType::WRITE_CSV_RELATION), child(std::move(child_p)),
+	      uri(std::move(uri_p)), options(std::move(options_p)) {
+		TryBindRelation(columns);
+	}
+
+	BoundStatement Bind(Binder &binder) override {
+		CopyStatement copy;
+		auto info = make_uniq<CopyInfo>();
+		info->select_relation = child;
+		info->is_from = false;
+		info->file_path = uri;
+		info->format = "lance";
+		info->options = options;
+		copy.info = std::move(info);
+		return binder.Bind(copy.Cast<SQLStatement>());
+	}
+
+	unique_ptr<QueryNode> GetQueryNode() override {
+		throw InternalException("Cannot create a query node from a write Lance relation");
+	}
+
+	string GetQuery() override {
+		return string();
+	}
+
+	const vector<ColumnDefinition> &Columns() override {
+		return columns;
+	}
+
+	string ToString(idx_t depth) override {
+		return RenderWhitespace(depth) + "Write To Lance [" + uri + "]\n" + child->ToString(depth + 1);
+	}
+
+	bool IsReadOnly() override {
+		return false;
+	}
+
+protected:
+	bool CanSerializeToQueryNodeInternal(Binder &) override {
+		return false;
+	}
+
+private:
+	shared_ptr<Relation> child;
+	string uri;
+	vector<ColumnDefinition> columns;
+	case_insensitive_map_t<vector<Value>> options;
+};
 
 DuckDBPyRelation::DuckDBPyRelation(shared_ptr<Relation> rel_p) : rel(std::move(rel_p)) {
 	if (!rel) {
@@ -1941,6 +1995,47 @@ void DuckDBPyRelation::ToCSV(const string &filename, const py::object &sep, cons
 		return;
 	}
 	PyExecuteRelation(write_csv);
+}
+
+void DuckDBPyRelation::ToLance(const string &uri, const string &mode, uint64_t max_rows_per_file,
+                               uint64_t max_rows_per_group, uint64_t max_bytes_per_file,
+                               const string &data_storage_version) {
+	if (uri.empty()) {
+		throw InvalidInputException("write_lance requires a non-empty dataset URI");
+	}
+	auto normalized_mode = StringUtil::Lower(mode);
+	if (normalized_mode != "create" && normalized_mode != "append" && normalized_mode != "overwrite") {
+		throw InvalidInputException("write_lance mode must be one of create, append, or overwrite");
+	}
+	if (max_rows_per_file == 0 || max_rows_per_group == 0 || max_bytes_per_file == 0) {
+		throw InvalidInputException("write_lance row and byte limits must be positive");
+	}
+	if (data_storage_version.empty()) {
+		throw InvalidInputException("write_lance data_storage_version cannot be empty");
+	}
+
+	case_insensitive_map_t<vector<Value>> options;
+	options["mode"] = {Value(normalized_mode)};
+	options["max_rows_per_file"] = {Value::UBIGINT(max_rows_per_file)};
+	options["max_rows_per_group"] = {Value::UBIGINT(max_rows_per_group)};
+	options["max_bytes_per_file"] = {Value::UBIGINT(max_bytes_per_file)};
+	options["data_storage_version"] = {Value(data_storage_version)};
+
+	auto write_lance = make_shared_ptr<WriteLanceRelation>(rel, uri, std::move(options));
+	if (TryDispatchToRunner(write_lance, connection_owner)) {
+		return;
+	}
+	PyExecuteRelation(write_lance);
+}
+
+void DuckDBPyRelation::AttachLanceSnapshotLease(py::object lease) {
+	AssertRelation();
+	if (lease.is_none()) {
+		throw InvalidInputException("Lance snapshot lease cannot be None");
+	}
+	auto dependency = make_uniq<ExternalDependency>();
+	dependency->AddDependency("lance_snapshot_lease", PythonDependencyItem::Create(std::move(lease)));
+	rel->AddExternalDependency(std::move(dependency));
 }
 
 // should this return a rel with the new view?

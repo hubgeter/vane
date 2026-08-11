@@ -10,6 +10,7 @@
 
 #include "duckdb/execution/distributed/plan/scan_task.hpp"
 #include "duckdb/function/extension_file_list_provider.hpp"
+#include "duckdb/function/extension_scan_split_provider.hpp"
 
 #include "duckdb/common/allocator.hpp"
 #include "duckdb/common/multi_file/multi_file_list.hpp"
@@ -271,6 +272,16 @@ static bool ApplyScanTasksToOperator(PhysicalOperator &op, const std::unordered_
 			} else if (!scan.bind_data) {
 				stats.missing_bind++;
 			} else {
+				auto *split_provider = dynamic_cast<ExtensionScanSplitProvider *>(scan.bind_data.get());
+				if (split_provider) {
+					split_provider->SetScanSplits(it->second.opaque_splits);
+					const idx_t split_count = it->second.file_count();
+					scan.extra_info.total_files = optional_idx(split_count);
+					scan.extra_info.filtered_files = optional_idx(split_count);
+					stats.applied++;
+					applied_any = true;
+					return true;
+				}
 				auto *multi_bind = dynamic_cast<MultiFileBindData *>(scan.bind_data.get());
 				if (!multi_bind) {
 					auto *ext_provider = dynamic_cast<ExtensionFileListProvider *>(scan.bind_data.get());
@@ -325,6 +336,8 @@ void ScanTaskDescriptor::Serialize(Serializer &serializer) const {
 	serializer.WriteProperty(3, "estimated_cardinality", estimated_cardinality);
 	serializer.WriteProperty(4, "estimated_bytes", estimated_bytes);
 	serializer.WriteProperty(5, "source_task_partition_id", source_task_partition_id);
+	serializer.WriteProperty(6, "opaque_splits", opaque_splits);
+	serializer.WritePropertyWithDefault<idx_t>(7, "cpu_slots", cpu_slots, 1);
 }
 
 ScanTaskDescriptor ScanTaskDescriptor::Deserialize(Deserializer &deserializer) {
@@ -345,6 +358,8 @@ ScanTaskDescriptor ScanTaskDescriptor::Deserialize(Deserializer &deserializer) {
 	deserializer.ReadPropertyWithDefault<idx_t>(3, "estimated_cardinality", desc.estimated_cardinality);
 	deserializer.ReadPropertyWithDefault<idx_t>(4, "estimated_bytes", desc.estimated_bytes);
 	desc.source_task_partition_id = deserializer.ReadProperty<idx_t>(5, "source_task_partition_id");
+	desc.opaque_splits = deserializer.ReadPropertyWithDefault<vector<string>>(6, "opaque_splits");
+	desc.cpu_slots = deserializer.ReadPropertyWithExplicitDefault<idx_t>(7, "cpu_slots", 1);
 	return desc;
 }
 
@@ -456,6 +471,30 @@ bool ApplyFteScanSourceQueuesToOperator(PhysicalOperator &op,
 						         std::to_string(node_id);
 					}
 					return false;
+				}
+				auto *split_provider = dynamic_cast<ExtensionScanSplitProvider *>(scan.bind_data.get());
+				if (split_provider) {
+					vector<string> splits;
+					while (true) {
+						auto next = entry->second->WaitForNext();
+						if (next.state == FteSplitQueue::GetResult::CANCELED ||
+						    next.state == FteSplitQueue::GetResult::FINISHED) {
+							break;
+						}
+						if (next.state != FteSplitQueue::GetResult::SPLIT) {
+							continue;
+						}
+						if (next.input.kind != TaskInput::Kind::ScanTask) {
+							throw InvalidInputException("dynamic extension scan source queue received non-scan split");
+						}
+						auto descriptor = ScanTaskDescriptor::DeserializeFromBytes(next.input.scan_task_bytes);
+						splits.insert(splits.end(), descriptor.opaque_splits.begin(), descriptor.opaque_splits.end());
+					}
+					split_provider->SetScanSplits(splits);
+					scan.extra_info.total_files = optional_idx(splits.size());
+					scan.extra_info.filtered_files = optional_idx(splits.size());
+					applied++;
+					return true;
 				}
 				auto *multi_bind = dynamic_cast<MultiFileBindData *>(scan.bind_data.get());
 				if (!multi_bind) {

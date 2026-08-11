@@ -1,0 +1,27 @@
+# Rust
+/target
+
+# DuckDB extension build
+build/
+configure/
+duckdb_unittest_tempdir/
+/test/bin
+/test/**/__manifest/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.ropeproject/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Temporary files
+*.tmp
+*.log

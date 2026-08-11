@@ -72,9 +72,9 @@ SchemaRef MakeSchemaFromTypes(const duckdb::vector<LogicalType> &types) {
 std::shared_ptr<DistributedPipelineNode>
 MakeScanSourceNode(PipelineNodeContext context, DuckPhysicalPlanRef scan_plan,
                    std::vector<duckdb::distributed::ScanTaskDescriptor> scan_tasks, SchemaRef schema,
-                   DuckDBExecutionConfigRef exec_cfg, bool is_external_scan) {
+                   DuckDBExecutionConfigRef exec_cfg, bool require_scan_tasks) {
 	auto scan_node = std::make_shared<ScanSourceNode>(std::move(context), std::move(scan_plan), std::move(scan_tasks),
-	                                                  std::move(schema), std::move(exec_cfg), is_external_scan);
+	                                                  std::move(schema), std::move(exec_cfg), require_scan_tasks);
 	return std::make_shared<DistributedPipelineNode>(scan_node);
 }
 

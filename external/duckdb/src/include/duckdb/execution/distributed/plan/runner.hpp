@@ -578,6 +578,7 @@ public:
 
 		std::string sink_base_path;
 		std::string sink_worker_base_path;
+		const bool single_commit_writer = sink_node && sink_node->spec().IsSingleCommitWriter();
 		if (sink_node) {
 			auto &fs = FileSystem::GetFileSystem(*client_context_);
 			auto canonical_res = CanonicalDistributedCopyBasePath(fs, sink_node->spec());
@@ -592,7 +593,7 @@ public:
 			sink_worker_base_path = std::move(worker_base_res).value();
 		}
 
-		if (sink_node && sink_node->staging_root_base().empty()) {
+		if (sink_node && sink_node->staging_root_base().empty() && !single_commit_writer) {
 			// Persist lifecycle metadata for explicit operator-managed cleanup. Starting a COPY must not age out
 			// other runs: elapsed time alone does not establish that another run is abandoned.
 			auto &fs = FileSystem::GetFileSystem(*client_context_);
@@ -601,6 +602,26 @@ public:
 			if (lifecycle_res.is_err()) {
 				return DuckDBResult<PlanResult>::err(lifecycle_res.error());
 			}
+		}
+		if (single_commit_writer) {
+			// Prepare the driver-local path now. CopySink writes and fsyncs the
+			// marker only after every upstream input has completed, immediately
+			// before exposing the one writer task for submission.
+			const char *session_dir = std::getenv("VANE_SESSION_DIR");
+			if (!session_dir || !*session_dir) {
+				return DuckDBResult<PlanResult>::err(
+				    DuckDBError::invalid_state_error("single-commit COPY requires VANE_SESSION_DIR"));
+			}
+			auto local_fs = FileSystem::CreateLocal();
+			auto barrier_dir = local_fs->JoinPath(session_dir, "lance_writer_barriers");
+			try {
+				local_fs->CreateDirectoriesRecursive(barrier_dir);
+			} catch (const std::exception &ex) {
+				return DuckDBResult<PlanResult>::err(DuckDBError::io_error(
+				    StringUtil::Format("failed to create Lance writer barrier directory: %s", ex.what())));
+			}
+			auto barrier_path = local_fs->JoinPath(barrier_dir, sink_node->staging_run_id() + ".writer_started");
+			sink_node->copy_sink()->set_writer_started_barrier_path(std::move(barrier_path));
 		}
 
 		// ── Step 3: Common setup — result channel + FTE execution ──
@@ -666,7 +687,34 @@ public:
 
 		// Sink path: collect all outputs, then finalize
 		auto sink_node_id = sink_node->copy_sink()->node_id();
+		auto single_commit_writer_started = [&]() {
+			if (!single_commit_writer) {
+				return false;
+			}
+			const auto &barrier_path = sink_node->copy_sink()->writer_started_barrier_path();
+			if (barrier_path.empty()) {
+				return false;
+			}
+			try {
+				return FileSystem::CreateLocal()->FileExists(barrier_path);
+			} catch (...) {
+				// Failure to inspect the retry boundary must fail closed.
+				return true;
+			}
+		};
+		auto remove_single_commit_writer_barrier = [&]() {
+			if (!single_commit_writer) {
+				return;
+			}
+			const auto &barrier_path = sink_node->copy_sink()->writer_started_barrier_path();
+			if (!barrier_path.empty()) {
+				FileSystem::CreateLocal()->TryRemoveFile(barrier_path);
+			}
+		};
 		auto cleanup_sink_output = [&]() {
+			if (single_commit_writer) {
+				return;
+			}
 			auto &fs = FileSystem::GetFileSystem(*client_context_);
 			if (sink_node->staging_root_base().empty()) {
 				CleanupDistributedCopyUncommittedDirectWriteRun(fs, sink_base_path, sink_node->staging_run_id());
@@ -682,6 +730,15 @@ public:
 			auto item = receiver.recv();
 			if (auto execute_error = execute_status->GetError()) {
 				cleanup_sink_output();
+				if (single_commit_writer_started()) {
+					DistributedCopyResult result;
+					result.output_base_path = sink_node->spec().file_path;
+					result.output_run_id = sink_node->staging_run_id();
+					result.output_direct_write = true;
+					result.output_outcome_unknown = true;
+					result.output_outcome_error = execute_error->what();
+					return DuckDBResult<PlanResult>::ok(PlanResult::make_copy(std::move(result)));
+				}
 				return DuckDBResult<PlanResult>::err(*execute_error);
 			}
 			if (!item.first) {
@@ -696,16 +753,38 @@ public:
 
 		if (auto execute_error = execute_status->GetError()) {
 			cleanup_sink_output();
+			if (single_commit_writer_started()) {
+				DistributedCopyResult result;
+				result.output_base_path = sink_node->spec().file_path;
+				result.output_run_id = sink_node->staging_run_id();
+				result.output_direct_write = true;
+				result.output_outcome_unknown = true;
+				result.output_outcome_error = execute_error->what();
+				return DuckDBResult<PlanResult>::ok(PlanResult::make_copy(std::move(result)));
+			}
 			return DuckDBResult<PlanResult>::err(*execute_error);
 		}
 
 		auto staging_write_ms = DistributedCopyElapsedMillis(staging_write_started);
 		auto finalize_res = sink_node->finalize(partitions, *client_context_);
 		if (finalize_res.is_err()) {
+			if (single_commit_writer_started()) {
+				DistributedCopyResult result;
+				result.output_base_path = sink_node->spec().file_path;
+				result.output_run_id = sink_node->staging_run_id();
+				result.output_direct_write = true;
+				result.output_outcome_unknown = true;
+				result.output_outcome_error = finalize_res.error().what();
+				return DuckDBResult<PlanResult>::ok(PlanResult::make_copy(std::move(result)));
+			}
 			return DuckDBResult<PlanResult>::err(finalize_res.error());
 		}
 		auto copy_result = std::move(finalize_res).value();
 		copy_result.staging_write_ms = staging_write_ms;
+		// The driver has now observed successful finalization. Retain the
+		// barrier on all outcome-unknown paths above, but do not leak one file
+		// per confirmed single-commit write for the lifetime of the session.
+		remove_single_commit_writer_barrier();
 		return DuckDBResult<PlanResult>::ok(PlanResult::make_copy(std::move(copy_result)));
 	}
 

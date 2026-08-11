@@ -756,6 +756,118 @@ def test_effective_session_config_reaches_nondefault_bootstrap_connection(tmp_pa
     ]
 
 
+def test_effective_session_config_installs_connection_local_lance_secret():
+    ray_cxx = _require_ray_cxx()
+    source_connection = vane.connect()
+    logical_plan = ray_cxx.PyLogicalPlan.from_duckdb_relation(
+        source_connection.sql("SELECT 1 AS value"),
+        "snapshot-effective-lance-secret",
+    )
+    effective_config = {
+        "AWS_ACCESS_KEY_ID": "resolved-profile-key",
+        "AWS_SECRET_ACCESS_KEY": "resolved-profile-secret",
+        "AWS_SESSION_TOKEN": "resolved-profile-token",
+        "AWS_ENDPOINT_URL": "127.0.0.1:19000",
+        "AWS_REGION": "us-east-1",
+    }
+
+    planning_connection = vane.connect()
+    physical_plan = logical_plan.to_physical_plan(
+        planning_connection,
+        effective_session_config=effective_config,
+    )
+    assert planning_connection.execute(
+        "SELECT name, type, provider, scope FROM duckdb_secrets() WHERE name = 'vane_lance_session'"
+    ).fetchall() == [("vane_lance_session", "lance", "config", ["s3://"])]
+    assert (
+        "endpoint=http://127.0.0.1:19000"
+        in planning_connection.execute(
+            "SELECT secret_string FROM duckdb_secrets() WHERE name = 'vane_lance_session'"
+        ).fetchone()[0]
+    )
+
+    worker_connection = vane.connect().cursor()
+    result = ray_cxx.DistributedPhysicalPlanRunner().execute_native(
+        worker_connection,
+        pickle.loads(pickle.dumps(physical_plan)),
+        effective_session_config=effective_config,
+    )
+    assert _table_from_native_result(result).column(0).to_pylist() == [1]
+    assert worker_connection.execute(
+        "SELECT name, type, provider, scope FROM duckdb_secrets() WHERE name = 'vane_lance_session'"
+    ).fetchall() == [("vane_lance_session", "lance", "config", ["s3://"])]
+
+
+def test_rest_namespace_auth_uses_connection_secret_replay():
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    from threading import Thread
+
+    ray_cxx = _require_ray_cxx()
+    requests: list[dict[str, str]] = []
+
+    class EmptyNamespaceHandler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            requests.append({key.lower(): value for key, value in self.headers.items()})
+            body = b'{"tables":[]}'
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, format, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), EmptyNamespaceHandler)
+    server_thread = Thread(target=server.serve_forever, daemon=True)
+    server_thread.start()
+    source_connection = vane.connect()
+    planning_connection = vane.connect()
+    try:
+        endpoint = f"http://127.0.0.1:{server.server_port}"
+        source_connection.execute(
+            "ATTACH 'replay_namespace' AS replay_ns "
+            f"(TYPE LANCE, ENDPOINT '{endpoint}', "
+            "BEARER_TOKEN 'rest-bearer-sentinel', API_KEY 'rest-api-key-sentinel', "
+            "HEADER 'x-vane-replay=rest-header-sentinel')"
+        )
+        assert requests
+        assert requests[-1]["authorization"] == "Bearer rest-bearer-sentinel"
+        assert requests[-1]["x-api-key"] == "rest-api-key-sentinel"
+        assert requests[-1]["x-vane-replay"] == "rest-header-sentinel"
+
+        logical_plan = ray_cxx.PyLogicalPlan.from_duckdb_relation(
+            source_connection.sql("SELECT 1 AS value"),
+            "rest-namespace-secret-replay",
+        )
+        state = logical_plan.__getstate__()
+        replay_secrets = state[3]["lance_namespace_secrets"]
+        assert len(replay_secrets) == 1
+        assert replay_secrets[0]["options"] == {
+            "api_key": "rest-api-key-sentinel",
+            "bearer_token": "rest-bearer-sentinel",
+            "headers_tsv": "x-vane-replay\trest-header-sentinel",
+        }
+        serialized_logical_plan = bytes(state[1])
+        for sentinel in (b"rest-api-key-sentinel", b"rest-bearer-sentinel", b"rest-header-sentinel"):
+            assert sentinel not in serialized_logical_plan
+
+        logical_plan.to_physical_plan(planning_connection)
+        replayed = planning_connection.execute(
+            "SELECT type, secret_string FROM duckdb_secrets() WHERE name LIKE '__vane_lance_namespace_replay_%'"
+        ).fetchall()
+        assert len(replayed) == 1
+        assert replayed[0][0] == "lance_namespace_replay"
+        for sentinel in ("rest-api-key-sentinel", "rest-bearer-sentinel", "rest-header-sentinel"):
+            assert sentinel not in replayed[0][1]
+    finally:
+        planning_connection.close()
+        source_connection.close()
+        server.shutdown()
+        server.server_close()
+        server_thread.join()
+
+
 def test_file_database_snapshot_baseline_ignores_database_target_settings(tmp_path):
     ray_cxx = _require_ray_cxx()
     database_path = str(tmp_path / "read-only-bootstrap.duckdb")

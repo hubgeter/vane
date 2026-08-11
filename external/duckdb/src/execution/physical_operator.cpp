@@ -1408,6 +1408,9 @@ unique_ptr<PhysicalOperator> PhysicalOperator::DeserializeOperatorData(Deseriali
 		auto partition_columns = deserializer.ReadProperty<vector<idx_t>>(214, "partition_columns");
 		auto names = deserializer.ReadProperty<vector<string>>(215, "names");
 		auto expected_types = deserializer.ReadProperty<vector<LogicalType>>(216, "expected_types");
+		auto single_commit_writer =
+		    deserializer.ReadPropertyWithExplicitDefault<bool>(217, "single_commit_writer", false);
+		auto task_cpu_slots = deserializer.ReadPropertyWithExplicitDefault<idx_t>(218, "task_cpu_slots", 1);
 
 		auto copy = make_uniq<PhysicalCopyToFile>(physical_plan, std::move(types), std::move(function),
 		                                          std::move(bind_data), estimated_cardinality);
@@ -1428,6 +1431,8 @@ unique_ptr<PhysicalOperator> PhysicalOperator::DeserializeOperatorData(Deseriali
 		copy->partition_columns = std::move(partition_columns);
 		copy->names = std::move(names);
 		copy->expected_types = std::move(expected_types);
+		copy->single_commit_writer = single_commit_writer;
+		copy->task_cpu_slots = task_cpu_slots;
 		return unique_ptr<PhysicalOperator>(std::move(copy));
 	}
 	case PhysicalOperatorType::BATCH_COPY_TO_FILE: {

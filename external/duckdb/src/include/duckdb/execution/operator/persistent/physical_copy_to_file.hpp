@@ -52,6 +52,10 @@ public:
 	string file_extension;
 	CopyOverwriteMode overwrite_mode;
 	bool parallel;
+	//! The copy function owns one external transaction and must receive all
+	//! input through a single distributed task.
+	bool single_commit_writer;
+	idx_t task_cpu_slots;
 	bool per_thread_output;
 	optional_idx file_size_bytes;
 	bool rotate;

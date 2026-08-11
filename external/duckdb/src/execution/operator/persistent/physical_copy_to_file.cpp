@@ -520,7 +520,8 @@ string PhysicalCopyToFile::GetNonTmpFile(ClientContext &context, const string &t
 PhysicalCopyToFile::PhysicalCopyToFile(PhysicalPlan &physical_plan, vector<LogicalType> types, CopyFunction function_p,
                                        unique_ptr<FunctionData> bind_data, idx_t estimated_cardinality)
     : PhysicalOperator(physical_plan, PhysicalOperatorType::COPY_TO_FILE, std::move(types), estimated_cardinality),
-      function(std::move(function_p)), bind_data(std::move(bind_data)), parallel(false) {
+      function(std::move(function_p)), bind_data(std::move(bind_data)), parallel(false), single_commit_writer(false),
+      task_cpu_slots(1) {
 }
 
 void PhysicalCopyToFile::SerializeOperatorData(Serializer &serializer) const {
@@ -551,6 +552,8 @@ void PhysicalCopyToFile::SerializeOperatorData(Serializer &serializer) const {
 	serializer.WriteProperty(214, "partition_columns", partition_columns);
 	serializer.WriteProperty(215, "names", names);
 	serializer.WriteProperty(216, "expected_types", expected_types);
+	serializer.WritePropertyWithDefault(217, "single_commit_writer", single_commit_writer, false);
+	serializer.WritePropertyWithDefault<idx_t>(218, "task_cpu_slots", task_cpu_slots, 1);
 }
 
 void PhysicalCopyToFile::WriteRotateInternal(ExecutionContext &context, GlobalSinkState &global_state,

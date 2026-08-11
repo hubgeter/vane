@@ -20,7 +20,7 @@ static constexpr const char *DISTRIBUTED_COPY_OUTPUT_PLACEHOLDER_PREFIX = "__duc
 static constexpr const char *DISTRIBUTED_COPY_DIRECT_WRITE_RUN_PREFIX = "_vane_direct_write_";
 static constexpr const char *DISTRIBUTED_COPY_DIRECT_WRITE_LIFECYCLE_FILE = "lifecycle.txt";
 
-enum class DistributedCopyType : uint8_t { COPY_TO_FILE = 0, BATCH_COPY_TO_FILE = 1 };
+enum class DistributedCopyType : uint8_t { COPY_TO_FILE = 0, BATCH_COPY_TO_FILE = 1, SINGLE_COMMIT_WRITER = 2 };
 
 struct DistributedCopySpec {
 	DistributedCopyType type = DistributedCopyType::COPY_TO_FILE;
@@ -32,6 +32,7 @@ struct DistributedCopySpec {
 	std::string file_extension;
 	CopyOverwriteMode overwrite_mode = CopyOverwriteMode::COPY_ERROR_ON_CONFLICT;
 	bool parallel = false;
+	idx_t task_cpu_slots = 1;
 	bool per_thread_output = false;
 	optional_idx file_size_bytes;
 	bool rotate = false;
@@ -57,6 +58,7 @@ struct DistributedCopySpec {
 		copy.file_extension = file_extension;
 		copy.overwrite_mode = overwrite_mode;
 		copy.parallel = parallel;
+		copy.task_cpu_slots = task_cpu_slots;
 		copy.per_thread_output = per_thread_output;
 		copy.file_size_bytes = file_size_bytes;
 		copy.rotate = rotate;
@@ -69,6 +71,10 @@ struct DistributedCopySpec {
 		copy.names = names;
 		copy.expected_types = expected_types;
 		return copy;
+	}
+
+	bool IsSingleCommitWriter() const {
+		return type == DistributedCopyType::SINGLE_COMMIT_WRITER;
 	}
 };
 

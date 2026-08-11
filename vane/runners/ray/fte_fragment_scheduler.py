@@ -1125,6 +1125,8 @@ def _is_write_sink_fragment(fragment_execution: Any) -> bool:
         "copy_output_remote_base",
         "sink_node_id",
         "copy_sink_node_id",
+        "single_commit_writer",
+        "single_commit_writer_started",
     }
     for payload in (
         getattr(fragment_execution, "context", None),

@@ -54,6 +54,29 @@ static void InitializeConsumers(py::class_<DuckDBPyRelation> &m) {
 	    py::arg("per_thread_output") = py::none(), py::arg("use_tmp_file") = py::none(),
 	    py::arg("partition_by") = py::none(), py::arg("write_partition_columns") = py::none());
 
+	auto write_lance = [](DuckDBPyRelation &relation, const string &uri, const string &mode, uint64_t max_rows_per_file,
+	                      uint64_t max_rows_per_group, uint64_t max_bytes_per_file,
+	                      const string &data_storage_version) {
+		auto lease = py::module_::import("vane.lance._coordinator").attr("_MutationLease")(uri);
+		try {
+			relation.ToLance(uri, mode, max_rows_per_file, max_rows_per_group, max_bytes_per_file,
+			                 data_storage_version);
+		} catch (...) {
+			try {
+				lease.attr("close")();
+			} catch (...) { // preserve the primary write failure
+			}
+			throw;
+		}
+		lease.attr("close_after_commit")(uri);
+	};
+	DefineMethod({"to_lance", "write_lance"}, m, write_lance, "Write the relation through one Lance transaction",
+	             py::arg("uri"), py::kw_only(), py::arg("mode") = "create",
+	             py::arg("max_rows_per_file") = 1024ULL * 1024ULL, py::arg("max_rows_per_group") = 1024ULL,
+	             py::arg("max_bytes_per_file") = 90ULL * 1024ULL * 1024ULL * 1024ULL,
+	             py::arg("data_storage_version") = "2.2");
+	m.def("_attach_lance_snapshot_lease", &DuckDBPyRelation::AttachLanceSnapshotLease, py::arg("lease"));
+
 	m.def("fetchone", &DuckDBPyRelation::FetchOne, "Execute and fetch a single row as a tuple")
 	    .def("fetchmany", &DuckDBPyRelation::FetchMany, "Execute and fetch the next set of rows as a list of tuples",
 	         py::arg("size") = 1)

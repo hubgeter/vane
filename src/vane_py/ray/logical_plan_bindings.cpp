@@ -443,6 +443,16 @@ static duckdb::unique_ptr<duckdb::MaterializedQueryResult> ExecuteSnapshotQuery(
 	return result;
 }
 
+static void ExecuteSensitiveSnapshotQuery(duckdb::Connection &conn, const string &sql, const string &description) {
+	auto result = conn.Query(sql);
+	if (!result) {
+		throw duckdb::InternalException("Snapshot query returned null result while " + description);
+	}
+	if (result->HasError()) {
+		throw duckdb::InvalidInputException("Snapshot query failed while " + description + ": " + result->GetError());
+	}
+}
+
 static string StripS3EndpointSchemeForDuckDB(const string &endpoint_url) {
 	auto scheme_pos = endpoint_url.find("://");
 	if (scheme_pos == string::npos) {
@@ -453,6 +463,16 @@ static string StripS3EndpointSchemeForDuckDB(const string &endpoint_url) {
 
 static bool S3EndpointUsesSSL(const string &endpoint_url) {
 	return duckdb::StringUtil::StartsWith(endpoint_url, "https://");
+}
+
+static string NormalizeLanceEndpointUrl(const string &endpoint_url) {
+	if (duckdb::StringUtil::StartsWith(endpoint_url, "//")) {
+		return "http:" + endpoint_url;
+	}
+	if (endpoint_url.find("://") == string::npos) {
+		return "http://" + endpoint_url;
+	}
+	return endpoint_url;
 }
 
 static void ConfigureConnectionForS3Endpoint(duckdb::Connection &conn, const string &endpoint_url,
@@ -501,6 +521,38 @@ static string VaneSessionConfigValue(const py::dict &config, const char *key) {
 	return py::str(config[py_key]).cast<string>();
 }
 
+static void ApplyLanceSessionSecret(duckdb::Connection &conn, const string &endpoint_url, const string &access_key,
+                                    const string &secret_key, const string &session_token, const string &region) {
+	if (access_key.empty() != secret_key.empty() || (!session_token.empty() && access_key.empty())) {
+		throw duckdb::InvalidInputException(
+		    "AWS static session credentials must provide both AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY");
+	}
+	if (endpoint_url.empty() && access_key.empty() && secret_key.empty() && session_token.empty() && region.empty()) {
+		return;
+	}
+
+	const auto provider = access_key.empty() ? string("credential_chain") : string("config");
+	string sql =
+	    "CREATE OR REPLACE TEMPORARY SECRET vane_lance_session (TYPE LANCE, PROVIDER " + provider + ", SCOPE 's3://'";
+	auto append_option = [&](const string &name, const string &value) {
+		if (!value.empty()) {
+			sql += ", " + name + " " + QuoteSQLStringLiteral(value);
+		}
+	};
+	append_option("ACCESS_KEY_ID", access_key);
+	append_option("SECRET_ACCESS_KEY", secret_key);
+	append_option("SESSION_TOKEN", session_token);
+	append_option("REGION", region);
+	const auto lance_endpoint_url = endpoint_url.empty() ? string() : NormalizeLanceEndpointUrl(endpoint_url);
+	append_option("ENDPOINT", lance_endpoint_url);
+	if (!endpoint_url.empty()) {
+		append_option("VIRTUAL_HOSTED_STYLE_REQUEST", "false");
+		append_option("ALLOW_HTTP", S3EndpointUsesSSL(lance_endpoint_url) ? "false" : "true");
+	}
+	sql += ")";
+	ExecuteSensitiveSnapshotQuery(conn, sql, "installing the temporary Lance session secret");
+}
+
 static void ApplyVaneSessionConfigValues(duckdb::Connection &conn, const py::dict &config) {
 	auto endpoint_url = VaneSessionConfigValue(config, "AWS_ENDPOINT_URL");
 	auto access_key = VaneSessionConfigValue(config, "AWS_ACCESS_KEY_ID");
@@ -537,6 +589,10 @@ static void ApplyVaneSessionConfigValues(duckdb::Connection &conn, const py::dic
 	ExecuteSnapshotQuery(conn, "SET http_retries=10");
 	ExecuteSnapshotQuery(conn, "SET http_retry_wait_ms=100");
 	ExecuteSnapshotQuery(conn, "SET http_retry_backoff=1.5");
+	// Physical plans never carry Lance storage credentials. Every planning and
+	// worker connection reconstructs one connection-local secret from the
+	// immutable Vane session snapshot before Lance bind data is deserialized.
+	ApplyLanceSessionSecret(conn, endpoint_url, access_key, secret_key, session_token, region);
 }
 
 static void ApplyVaneSessionConfig(duckdb::Connection &conn, const py::object &snapshot_obj) {
@@ -598,6 +654,102 @@ static std::vector<ConnectionSettingRecord> QueryConnectionSettings(DuckDBPyConn
 		settings.push_back(std::move(record));
 	}
 	return settings;
+}
+
+static constexpr const char *LANCE_NAMESPACE_REPLAY_SECRET_TYPE = "lance_namespace_replay";
+static constexpr const char *LANCE_NAMESPACE_REPLAY_SECRET_PREFIX = "__vane_lance_namespace_replay_";
+
+static py::list CaptureLanceNamespaceReplaySecrets(DuckDBPyConnection &conn_wrapper) {
+	py::list result;
+	auto &context = *conn_wrapper.con.GetConnection().context;
+	context.RunFunctionInTransaction([&]() {
+		auto transaction = duckdb::CatalogTransaction::GetSystemCatalogTransaction(context);
+		for (auto &entry : duckdb::SecretManager::Get(context).AllSecrets(transaction)) {
+			if (!entry.secret ||
+			    !duckdb::StringUtil::CIEquals(entry.secret->GetType(), LANCE_NAMESPACE_REPLAY_SECRET_TYPE) ||
+			    !duckdb::StringUtil::StartsWith(entry.secret->GetName(), LANCE_NAMESPACE_REPLAY_SECRET_PREFIX)) {
+				continue;
+			}
+			auto *secret = dynamic_cast<const duckdb::KeyValueSecret *>(entry.secret.get());
+			if (!secret) {
+				throw duckdb::InvalidInputException("Lance namespace replay secret must be a key/value secret");
+			}
+			py::dict secret_obj;
+			secret_obj[py::str("name")] = py::str(secret->GetName());
+			secret_obj[py::str("scope")] = py::cast(secret->GetScope());
+			py::dict options_obj;
+			for (auto &item : secret->secret_map) {
+				if (!item.second.IsNull()) {
+					options_obj[py::str(item.first)] = py::str(item.second.ToString());
+				}
+			}
+			secret_obj[py::str("options")] = std::move(options_obj);
+			result.append(std::move(secret_obj));
+		}
+	});
+	return result;
+}
+
+static void ApplyLanceNamespaceReplaySecrets(duckdb::Connection &conn, const py::dict &snapshot) {
+	auto snapshot_key = py::str("lance_namespace_secrets");
+	if (!snapshot.contains(snapshot_key) || snapshot[snapshot_key].is_none()) {
+		return;
+	}
+	auto secrets_obj = snapshot[snapshot_key];
+	if (!py::isinstance<py::list>(secrets_obj)) {
+		throw duckdb::InvalidInputException("Lance namespace replay secrets must be a list");
+	}
+	static const duckdb::case_insensitive_set_t allowed_keys = {"bearer_token", "api_key", "headers_tsv"};
+	auto &context = *conn.context;
+	context.RunFunctionInTransaction([&]() {
+		auto transaction = duckdb::CatalogTransaction::GetSystemCatalogTransaction(context);
+		auto &secret_manager = duckdb::SecretManager::Get(context);
+		for (auto item : secrets_obj.cast<py::list>()) {
+			if (!py::isinstance<py::dict>(item)) {
+				throw duckdb::InvalidInputException("Lance namespace replay secret entry must be a dict");
+			}
+			auto secret_obj = py::reinterpret_borrow<py::dict>(item);
+			if (!secret_obj.contains(py::str("name")) || !secret_obj.contains(py::str("scope")) ||
+			    !secret_obj.contains(py::str("options"))) {
+				throw duckdb::InvalidInputException("Lance namespace replay secret entry is incomplete");
+			}
+			auto name = py::str(secret_obj[py::str("name")]).cast<string>();
+			if (!duckdb::StringUtil::StartsWith(name, LANCE_NAMESPACE_REPLAY_SECRET_PREFIX)) {
+				throw duckdb::InvalidInputException("Invalid Lance namespace replay secret name");
+			}
+			auto scope_obj = secret_obj[py::str("scope")];
+			if (!py::isinstance<py::list>(scope_obj)) {
+				throw duckdb::InvalidInputException("Lance namespace replay secret scope must be a list");
+			}
+			vector<string> scope;
+			for (auto scope_item : scope_obj.cast<py::list>()) {
+				auto path = py::str(scope_item).cast<string>();
+				if (path.empty()) {
+					throw duckdb::InvalidInputException("Lance namespace replay secret scope cannot be empty");
+				}
+				scope.push_back(std::move(path));
+			}
+			if (scope.empty()) {
+				throw duckdb::InvalidInputException("Lance namespace replay secret must have a scope");
+			}
+			auto options_obj = secret_obj[py::str("options")];
+			if (!py::isinstance<py::dict>(options_obj)) {
+				throw duckdb::InvalidInputException("Lance namespace replay secret options must be a dict");
+			}
+			auto secret = make_uniq<duckdb::KeyValueSecret>(scope, LANCE_NAMESPACE_REPLAY_SECRET_TYPE, "config", name);
+			for (auto option : options_obj.cast<py::dict>()) {
+				auto key = py::str(option.first).cast<string>();
+				if (allowed_keys.find(key) == allowed_keys.end()) {
+					throw duckdb::InvalidInputException("Invalid Lance namespace replay secret option: " + key);
+				}
+				auto value = py::str(option.second).cast<string>();
+				secret->secret_map[key] = duckdb::Value(std::move(value));
+				secret->redact_keys.insert(key);
+			}
+			secret_manager.RegisterSecret(transaction, std::move(secret), duckdb::OnCreateConflict::REPLACE_ON_CONFLICT,
+			                              duckdb::SecretPersistType::TEMPORARY);
+		}
+	});
 }
 
 static void RejectNonStaticRayExtensions(const std::vector<string> &extension_names) {
@@ -670,6 +822,10 @@ static py::object CaptureConnectionSnapshot(DuckDBPyConnection &conn_wrapper) {
 	// extension before reaching this point.
 	snapshot_obj[py::str("extensions")] = py::list();
 	snapshot_obj[py::str("settings")] = std::move(settings_obj);
+	auto lance_namespace_secrets = CaptureLanceNamespaceReplaySecrets(conn_wrapper);
+	if (py::len(lance_namespace_secrets) > 0) {
+		snapshot_obj[py::str("lance_namespace_secrets")] = std::move(lance_namespace_secrets);
+	}
 	if (VaneRaySessionLifecycleEnabled()) {
 		conn_wrapper.MarkVaneRaySessionOpened();
 	}
@@ -712,6 +868,7 @@ static void ApplyConnectionSnapshot(py::object conn_obj, const py::object &snaps
 	if (apply_session_config) {
 		ApplyVaneSessionConfig(conn, snapshot_obj);
 	}
+	ApplyLanceNamespaceReplaySecrets(conn, snapshot);
 
 	if (!snapshot.contains(py::str("settings"))) {
 		return;

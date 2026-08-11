@@ -195,6 +195,7 @@ class _FakeConnection:
     def __init__(self) -> None:
         self.cursors: list[_FakeConnection] = []
         self.statements: list[str] = []
+        self.executions: list[tuple[str, object | None]] = []
         self.closed = False
 
     def cursor(self) -> _FakeConnection:
@@ -202,8 +203,9 @@ class _FakeConnection:
         self.cursors.append(cursor)
         return cursor
 
-    def execute(self, statement: str) -> _FakeConnection:
+    def execute(self, statement: str, parameters: object | None = None) -> _FakeConnection:
         self.statements.append(statement)
+        self.executions.append((statement, parameters))
         return self
 
     def close(self) -> None:
@@ -3664,6 +3666,18 @@ def test_driver_applies_session_s3_config_to_query_cursor(copy_plan):
     assert "SET s3_access_key_id='session-key'" in query_connection.statements
     assert "SET s3_secret_access_key='session-secret'" in query_connection.statements
     assert "SET s3_region='us-east-2'" in query_connection.statements
+    lance_secret_sql, lance_secret_parameters = next(
+        execution for execution in query_connection.executions if "TEMPORARY SECRET vane_lance_session" in execution[0]
+    )
+    assert "session-key" not in lance_secret_sql
+    assert "session-secret" not in lance_secret_sql
+    assert lance_secret_parameters == [
+        {
+            "access_key_id": "session-key",
+            "secret_access_key": "session-secret",
+            "region": "us-east-2",
+        }
+    ]
     assert query_connection.closed is True
 
 
@@ -3724,6 +3738,10 @@ def test_driver_explicit_s3_settings_bypass_and_clear_session_credentials(monkey
     assert "SET s3_access_key_id=''" in query_connection.statements
     assert "SET s3_secret_access_key=''" in query_connection.statements
     assert "SET s3_session_token=''" in query_connection.statements
+    _, lance_secret_parameters = next(
+        execution for execution in query_connection.executions if "TEMPORARY SECRET vane_lance_session" in execution[0]
+    )
+    assert lance_secret_parameters == [{}]
     assert query_connection.closed is True
 
 

@@ -711,6 +711,36 @@ def _configure_duckdb_s3(
     conn.execute("SET http_retries=10")
     conn.execute("SET http_retry_wait_ms=100")
     conn.execute("SET http_retry_backoff=1.5")
+
+    # Lance reads credentials exclusively through its own scoped secret type.
+    # Keep the secret temporary and connection-local: physical plans only carry
+    # the dataset URI and workers reconstruct this secret from their immutable
+    # Vane session snapshot.
+    lance_options: dict[str, str] = {}
+    if access_key:
+        lance_options["access_key_id"] = access_key
+    if secret_key:
+        lance_options["secret_access_key"] = secret_key
+    if session_token:
+        lance_options["session_token"] = session_token
+    if region:
+        lance_options["region"] = region
+    if endpoint_url:
+        if endpoint_url.startswith("//"):
+            lance_endpoint = f"http:{endpoint_url}"
+        elif "://" not in endpoint_url:
+            lance_endpoint = f"http://{endpoint_url}"
+        else:
+            lance_endpoint = endpoint_url
+        lance_options["endpoint"] = lance_endpoint
+        lance_options["virtual_hosted_style_request"] = "false"
+        lance_options["allow_http"] = "true" if not lance_endpoint.lower().startswith("https://") else "false"
+    provider = "config" if access_key and secret_key else "credential_chain"
+    conn.execute(
+        f"CREATE OR REPLACE TEMPORARY SECRET vane_lance_session "
+        f"(TYPE LANCE, PROVIDER {provider}, SCOPE 's3://', STORAGE_OPTIONS ?)",
+        [lance_options],
+    )
     return effective_config
 
 
@@ -826,6 +856,7 @@ class RayWorkerActor:
         ray_node_ip_address: str = "",
     ) -> None:
         scrub_shared_runtime_session_env()
+        os.environ["VANE_LANCE_WORKER_CPUS"] = str(max(1, int(num_cpus)))
         ray_node_ip_address = str(ray_node_ip_address or "").strip()
         if ray_node_ip_address and not os.environ.get("VANE_FLIGHT_ADVERTISE_HOST", "").strip():
             os.environ["VANE_FLIGHT_ADVERTISE_HOST"] = ray_node_ip_address

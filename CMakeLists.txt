@@ -214,10 +214,14 @@ elseif(UNIX AND NOT APPLE)
   # Use a version script to export only the two required symbols. This hides all
   # internal symbols (including statically-linked OpenSSL from httpfs) from the
   # dynamic symbol table, preventing SIGSEGV crashes caused by symbol conflicts
-  # with system OpenSSL loaded by Ray/Python/gRPC in the same process.
+  # with system OpenSSL loaded by Ray/Python/gRPC in the same process. DuckDB's
+  # static build compiles release objects into function/data sections; discard
+  # unreachable sections here so vendored static extensions do not inflate the
+  # published Python wheel with code that cannot be called.
   target_link_options(
     _native
     PRIVATE
+    "LINKER:--gc-sections"
     "LINKER:--version-script=${CMAKE_CURRENT_SOURCE_DIR}/cmake/exported_symbols.version"
   )
 elseif(WIN32)

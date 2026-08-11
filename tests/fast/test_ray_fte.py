@@ -7033,6 +7033,62 @@ def test_fte_worker_task_manager_explicit_admission_reports_memory_stats():
     asyncio.run(run())
 
 
+def test_fte_worker_task_manager_charges_weighted_cpu_slots():
+    started: list[int] = []
+    release_first = asyncio.Event()
+
+    async def execute_fn(request):
+        attempt = FteTaskAttemptId.coerce(request["task_id"])
+        started.append(attempt.partition_id)
+        if attempt.partition_id == 0:
+            await release_first.wait()
+        return {"partition": attempt.partition_id}
+
+    async def run():
+        manager = _fte_worker_task_manager(execute_fn, max_running_tasks=4)
+        task0 = {"query_id": "qcpu", "fragment_execution_id": 0, "partition_id": 0, "attempt_id": 0}
+        task1 = {"query_id": "qcpu", "fragment_execution_id": 0, "partition_id": 1, "attempt_id": 0}
+
+        status0 = await manager.create_task(
+            {
+                "task_id": task0,
+                "fragment_id": "qcpu:node:scan",
+                "context": {"task_cpu_slots": "3"},
+            }
+        )
+        status1 = await manager.create_task(
+            {
+                "task_id": task1,
+                "fragment_id": "qcpu:node:scan",
+                "context": {"task_cpu_slots": "2"},
+            }
+        )
+        await asyncio.sleep(0)
+
+        assert status0["state"] == FteTaskState.RUNNING.value
+        assert status0["executor_running_cpu_slots"] == 3
+        assert status0["executor_task_cpu_slots"] == 3
+        assert status1["state"] == FteTaskState.QUEUED.value
+        assert status1["executor_running_cpu_slots"] == 3
+        assert status1["executor_task_cpu_slots"] == 2
+        assert started == [0]
+
+        release_first.set()
+        for _ in range(50):
+            status1 = await manager.get_task_status(task1)
+            if status1["state"] == FteTaskState.FINISHED.value:
+                break
+            await asyncio.sleep(0.01)
+        await asyncio.sleep(0)
+        status1 = await manager.get_task_status(task1)
+
+        assert started == [0, 1]
+        assert status1["state"] == FteTaskState.FINISHED.value
+        assert status1["executor_running_cpu_slots"] == 0
+
+    asyncio.run(run())
+
+
 def test_fte_worker_task_manager_explicit_admission_uses_task_memory_requirement():
     started: list[str] = []
     release_first = asyncio.Event()

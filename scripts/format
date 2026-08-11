@@ -19,12 +19,12 @@ Actions:
   --check     Verify formatting without modifying files.
 
 Subcommands:
-  root        Format the root repository only. Does not enter external/duckdb.
+  root        Format Vane-owned files only. Excludes vendored external source trees.
   duckdb      Format external/duckdb only, using DuckDB's own formatter.
   workspace   Format both root and external/duckdb with their own formatters.
 
 Root repository file sets:
-  --all       All root git-tracked files.
+  --all       All Vane-owned git-tracked files.
   --changed   Root files changed relative to HEAD. Default.
   --staged    Root files staged with git add. This is not git stash.
   --from-ref  Files changed relative to REF.
@@ -51,6 +51,7 @@ Examples:
 Notes:
   external/duckdb contains C++, Python, CMake, test, and benchmark files.
   Its formatter is intentionally separate from the root repository formatter.
+  external/lance-duckdb retains its vendored upstream formatting and is excluded.
   workspace runs root and external/duckdb independently, then reports failures.
   root requires pre-commit on PATH.
   duckdb requires black 24.x, clang-format 11.0.1, and cmake-format on PATH.
@@ -164,9 +165,13 @@ root_hooks() {
 
 root_changed_files() {
   if [[ "$file_set" == "from_ref" ]]; then
-    git diff --name-only --diff-filter=ACMRT "$diff_ref" -- . ':(exclude)external/duckdb/**'
+    git diff --name-only --diff-filter=ACMRT "$diff_ref" -- . \
+      ':(exclude)external/duckdb/**' \
+      ':(exclude)external/lance-duckdb/**'
   else
-    git diff --name-only --diff-filter=ACMRT HEAD -- . ':(exclude)external/duckdb/**'
+    git diff --name-only --diff-filter=ACMRT HEAD -- . \
+      ':(exclude)external/duckdb/**' \
+      ':(exclude)external/lance-duckdb/**'
   fi
 }
 

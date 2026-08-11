@@ -8,6 +8,10 @@ Vane contains Python, pybind11, and a modified DuckDB C++ engine. A native build
 - Python 3.10 through 3.14; Python 3.12 is recommended and is the primary development version
 - Git with `git subtree` support
 - A C++20 compiler, CMake 3.29+, Ninja, and ccache
+- The stable Rust toolchain (as selected by
+  `external/lance-duckdb/rust-toolchain.toml`) and Cargo
+- Protocol Buffers compiler (`protoc`); the vcpkg bootstrap installs the
+  pinned host tool used by the native build
 - vcpkg at the baseline pinned in `vcpkg.json`
 
 The DuckDB engine fork is included directly under `external/duckdb`; a normal
@@ -23,6 +27,20 @@ The helper checks out the exact baseline from `vcpkg.json`, installs into
 `vcpkg_installed`, and verifies the committed native-dependency license bundle.
 When intentionally changing native dependencies, regenerate the bundle with
 `python scripts/sync_vcpkg_licenses.py` and review its diff.
+
+The statically linked Lance extension resolves Rust crates only through its
+committed lock file. When intentionally changing `Cargo.toml` or `Cargo.lock`,
+regenerate and review its binary-dependency license bundle:
+
+```bash
+python scripts/sync_lance_cargo_licenses.py
+```
+
+Run the committed dependency graph through RustSec after changing it:
+
+```bash
+cargo audit --file external/lance-duckdb/Cargo.lock
+```
 
 ## Incremental package build
 
@@ -144,11 +162,15 @@ To check changes relative to a committed ref, including in CI, use:
 scripts/format workspace --from-ref origin/main --check
 ```
 
-The root formatter deliberately excludes `external/duckdb`. Format DuckDB subtree changes with:
+The root formatter deliberately excludes the vendored `external/duckdb` and
+`external/lance-duckdb` source trees. Format DuckDB subtree changes with:
 
 ```bash
 scripts/format duckdb --changed
 ```
+
+`external/lance-duckdb` retains its upstream formatting. Keep local patches
+minimal and do not reformat unrelated vendored code.
 
 ## Updating the DuckDB subtree
 

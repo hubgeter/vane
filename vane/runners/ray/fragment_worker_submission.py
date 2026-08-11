@@ -355,6 +355,20 @@ class FteWorkerSubmissionMixin:
                 partition.task_id.partition_id,
             )
 
+        task_context_info = {
+            **dict(item.get("task_context_info") or {}),
+            **(
+                {"exchange_sink_instance": item.get("exchange_sink_instance")}
+                if item.get("exchange_sink_instance") is not None
+                else {}
+            ),
+        }
+        single_commit_started = any(
+            str(payload.get("single_commit_writer_started", "")).strip().lower() in {"1", "true", "yes", "on"}
+            for payload in (fragment_execution_context, task_context_info)
+            if isinstance(payload, dict)
+        )
+
         fragment_execution = FteFragmentExecution(
             query_id,
             self._next_fte_fragment_execution_id(query_id, fragment_id),
@@ -367,17 +381,11 @@ class FteWorkerSubmissionMixin:
             attempt_admission_callback=admit_attempt,
             attempt_admission_abandon_callback=abandon_attempt_admission,
             worker_reservation_callback=request_worker_reservation,
+            max_attempts=1 if single_commit_started else 4,
             context=fragment_execution_context,
             fragment_plan=item.get("fragment_plan"),
             fragment_registration_result=fragment_registration_result,
-            task_context_info={
-                **dict(item.get("task_context_info") or {}),
-                **(
-                    {"exchange_sink_instance": item.get("exchange_sink_instance")}
-                    if item.get("exchange_sink_instance") is not None
-                    else {}
-                ),
-            },
+            task_context_info=task_context_info,
             source_node_ids=dynamic_scan_sources | dynamic_exchange_sources,
             dynamic_scan_source_node_ids=dynamic_scan_sources,
             dynamic_exchange_source_node_ids=dynamic_exchange_sources,

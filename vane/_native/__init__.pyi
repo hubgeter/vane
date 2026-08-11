@@ -345,6 +345,7 @@ class DuckDBPyConnection:
         union_by_name: bool = False,
         compression: typing.Any = None,
     ) -> DuckDBPyRelation: ...
+    def read_lance(self, uri: str) -> DuckDBPyRelation: ...
     def register(self, view_name: str, python_object: object) -> DuckDBPyConnection: ...
     def register_filesystem(self, filesystem: fsspec.AbstractFileSystem) -> None: ...
     def remove_function(self, name: str) -> DuckDBPyConnection: ...
@@ -794,6 +795,26 @@ class DuckDBPyRelation:
         append: bool | None = None,
         filename_pattern: str | None = None,
         file_size_bytes: str | int | None = None,
+    ) -> None: ...
+    def to_lance(
+        self,
+        uri: str,
+        *,
+        mode: typing.Literal["create", "append", "overwrite"] = "create",
+        max_rows_per_file: int = 1048576,
+        max_rows_per_group: int = 1024,
+        max_bytes_per_file: int = 96636764160,
+        data_storage_version: str = "2.2",
+    ) -> None: ...
+    def write_lance(
+        self,
+        uri: str,
+        *,
+        mode: typing.Literal["create", "append", "overwrite"] = "create",
+        max_rows_per_file: int = 1048576,
+        max_rows_per_group: int = 1024,
+        max_bytes_per_file: int = 96636764160,
+        data_storage_version: str = "2.2",
     ) -> None: ...
     @property
     def alias(self) -> str: ...

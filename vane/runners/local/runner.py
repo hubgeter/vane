@@ -408,6 +408,8 @@ class LocalRunner(Runner):
         self.execution_mode = _normalize_execution_mode(execution_mode)
         os.environ["VANE_LOCAL_FTE_WORKERS"] = str(self.num_workers)
         os.environ["VANE_LOCAL_FTE_EXECUTION_MODE"] = self.execution_mode
+        available_cpus = os.cpu_count() or 1
+        os.environ["VANE_LANCE_WORKER_CPUS"] = str(max(1, available_cpus // self.num_workers))
 
     def run_iter(self, relation: Any) -> Iterator[Any]:
         raise NotImplementedError("local FTE run_iter is not implemented yet")

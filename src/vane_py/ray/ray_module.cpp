@@ -79,6 +79,8 @@ static inline int DuckdbGetEnvIntMs(const char *name) {
 #include <duckdb/parallel/thread_context.hpp>
 #include <duckdb/parallel/task_scheduler.hpp>
 #include <duckdb/main/prepared_statement_data.hpp>
+#include <duckdb/catalog/catalog_transaction.hpp>
+#include <duckdb/main/secret/secret_manager.hpp>
 #include <duckdb/execution/operator/helper/physical_materialized_collector.hpp>
 #include <duckdb/execution/operator/exchange/physical_remote_exchange_sink.hpp>
 #include <duckdb/execution/operator/exchange/physical_remote_exchange_source.hpp>
@@ -1468,8 +1470,9 @@ void register_ray_bindings(py::module_ &mod) {
 	        py::arg("effective_session_config") = py::none(), "Execute physical plan using DuckDB's native Executor");
 
 	// Merge multiple raw-bytes ScanTaskDescriptors into one.
-	// Each descriptor may contain multiple files; the merged result is a single
-	// ScanTaskDescriptor whose file list is the concatenation of all inputs.
+	// Each descriptor may contain multiple files or opaque extension splits;
+	// the merged result concatenates the applicable work units and charges the
+	// largest CPU-slot request.
 	m.def(
 	    "merge_scan_task_descriptors",
 	    [](const py::list &bytes_list) -> py::bytes {
@@ -1491,15 +1494,29 @@ void register_ray_bindings(py::module_ &mod) {
 			    merged.estimated_cardinality =
 			        SaturatingAddIdx(merged.estimated_cardinality, desc.estimated_cardinality);
 			    merged.estimated_bytes = SaturatingAddIdx(merged.estimated_bytes, desc.estimated_bytes);
+			    merged.cpu_slots = MaxValue<idx_t>(merged.cpu_slots, desc.cpu_slots);
 			    merged.files.insert(merged.files.end(), std::make_move_iterator(desc.files.begin()),
 			                        std::make_move_iterator(desc.files.end()));
+			    merged.opaque_splits.insert(merged.opaque_splits.end(),
+			                                std::make_move_iterator(desc.opaque_splits.begin()),
+			                                std::make_move_iterator(desc.opaque_splits.end()));
 		    }
 		    auto result = merged.SerializeToBytes();
 		    return py::bytes(result);
 	    },
 	    py::arg("bytes_list"),
 	    "Merge multiple raw-bytes ScanTaskDescriptors into a single descriptor "
-	    "by concatenating their file lists.");
+	    "by concatenating their file lists or opaque extension splits.");
+
+	m.def(
+	    "scan_task_cpu_slots",
+	    [](py::bytes bytes_obj) {
+		    using namespace duckdb::distributed;
+		    string raw(bytes_obj);
+		    auto desc = ScanTaskDescriptor::DeserializeFromBytes(raw);
+		    return desc.cpu_slots;
+	    },
+	    py::arg("bytes"), "Return the CPU-slot admission charge from a scan descriptor.");
 
 	m.def(
 	    "scan_task_source_partition_id",

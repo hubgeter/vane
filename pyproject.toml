@@ -23,6 +23,8 @@ license-files = [
     "external/duckdb/third_party/thrift/thrift/LICENSE",
     "external/duckdb/extension/icu/third_party/icu/LICENSE",
     "external/duckdb/extension/jemalloc/jemalloc/LICENSE",
+    "external/lance-duckdb/LICENSE",
+    "LICENSES/lance-rust-dependencies.txt",
 ]
 keywords = ["Vane", "DuckDB", "Ray", "Distributed", "Database", "SQL", "OLAP"]
 requires-python = ">=3.10,<3.15"
@@ -125,7 +127,7 @@ exclude = [
 ]
 
 [tool.scikit-build.cmake.define]
-BUILD_EXTENSIONS = "core_functions;json;parquet;icu;jemalloc;httpfs"
+BUILD_EXTENSIONS = "core_functions;json;parquet;icu;jemalloc;httpfs;lance"
 
 # Override: if COVERAGE is set then:
 # - we create a RelWithDebInfo build
@@ -197,6 +199,7 @@ include = [
     "/scripts/run_release_tests.sh",
     "/scripts/resolve_duckdb_fork_version.py",
     "/scripts/sync_duckdb_source_id.py",
+    "/scripts/sync_lance_cargo_licenses.py",
     "/scripts/sync_vcpkg_licenses.py",
     "/scripts/verify_base_install.py",
     "/scripts/verify_duckdb_coexistence.py",
@@ -211,6 +214,8 @@ include = [
     "/tests/fast/test_transformers_provider_security.py",
     "/tests/fast/test_vane_config.py",
     "/tests/fast/test_expression_udf_contracts.py",
+    "/tests/fast/test_lance.py",
+    "/tests/fast/test_lance_coordinator.py",
     "/tests/fast/test_local_e2e.py",
     "/tests/fast/test_ray_cpp_bindings.py",
     "/tests/fast/test_ray_remote_exceptions.py",
@@ -282,6 +287,21 @@ include = [
     "external/duckdb/.github/config/extensions/httpfs.cmake",
     "external/duckdb/scripts/append_metadata.cmake",
     "external/duckdb/scripts/null.txt",
+
+    # Statically linked lance-duckdb extension.  Keep the build inputs as a
+    # positive allowlist; upstream CI, benchmarks, and test data stay in Git
+    # but are not required to build a release artifact.
+    "external/lance-duckdb/CMakeLists.txt",
+    "external/lance-duckdb/Cargo.toml",
+    "external/lance-duckdb/Cargo.lock",
+    "external/lance-duckdb/LICENSE",
+    "external/lance-duckdb/README.md",
+    "external/lance-duckdb/VENDORING.md",
+    "external/lance-duckdb/rust-toolchain.toml",
+    "external/lance-duckdb/rust/**",
+    "external/lance-duckdb/src/**",
+    "external/lance-duckdb/test/data/search_test_data.lance/**",
+    "external/lance-duckdb/vendor-patches/**",
 
     # scikit-build-core lets include rules take precedence over exclude rules.
     # Keep these negations here so broad package includes do not ship local caches.

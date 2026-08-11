@@ -42,6 +42,12 @@ public:
 	CopySinkNode(NodeID node_id, PipelineNodeRef child, DistributedCopySpec spec)
 	    : ctx_(InheritPipelineNodeContext(child, node_id, "CopySink")),
 	      config_(child ? child->config() : PipelineNodeConfig()), child_(std::move(child)), spec_(std::move(spec)) {
+		if (spec_.IsSingleCommitWriter()) {
+			// The actual dataset URI is embedded in the worker plan. Lance owns
+			// its transaction and publishes no per-file staging metadata.
+			staging_run_id_ = UUID::ToString(UUID::GenerateRandomUUID());
+			return;
+		}
 		const auto local_staging_enabled = DistributedCopyLocalStagingEnabled();
 		if (FileSystem::IsRemoteFile(spec_.file_path) && local_staging_enabled) {
 			throw InvalidInputException(StringUtil::Format(
@@ -85,6 +91,12 @@ public:
 	const std::string &staging_run_id() const {
 		return staging_run_id_;
 	}
+	const std::string &writer_started_barrier_path() const {
+		return writer_started_barrier_path_;
+	}
+	void set_writer_started_barrier_path(std::string path) {
+		writer_started_barrier_path_ = std::move(path);
+	}
 
 	std::vector<PipelineNodeRef> children() const override {
 		return {child_};
@@ -102,6 +114,7 @@ private:
 	DistributedCopySpec spec_;
 	std::string staging_root_base_;
 	std::string staging_run_id_;
+	std::string writer_started_barrier_path_;
 };
 
 } // namespace distributed

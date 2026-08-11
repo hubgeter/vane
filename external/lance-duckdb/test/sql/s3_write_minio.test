@@ -1,0 +1,49 @@
+# name: test/sql/s3_write_minio.test
+# description: End-to-end S3 write against MinIO using DuckDB secrets (TYPE LANCE)
+# group: [sql]
+
+require-env LANCE_TEST_S3 1
+
+test-env LANCE_S3_ENDPOINT http://127.0.0.1:9000
+
+test-env LANCE_S3_REGION us-east-1
+
+test-env LANCE_S3_BUCKET lance-test
+
+test-env LANCE_S3_ACCESS_KEY_ID minioadmin
+
+test-env LANCE_S3_SECRET_ACCESS_KEY minioadmin
+
+test-env LANCE_S3_WRITE_DATASET_PREFIX write_test_data.lance
+
+require lance
+
+statement ok
+CREATE SECRET (
+  TYPE LANCE,
+  PROVIDER config,
+  SCOPE 's3://${LANCE_S3_BUCKET}/',
+  ACCESS_KEY_ID '${LANCE_S3_ACCESS_KEY_ID}',
+  SECRET_ACCESS_KEY '${LANCE_S3_SECRET_ACCESS_KEY}',
+  REGION '${LANCE_S3_REGION}',
+  ENDPOINT '${LANCE_S3_ENDPOINT}',
+  VIRTUAL_HOSTED_STYLE_REQUEST false,
+  ALLOW_HTTP true
+);
+
+statement ok
+COPY (
+  SELECT 1::BIGINT AS id, 'a'::VARCHAR AS s
+  UNION ALL
+  SELECT 2::BIGINT AS id, 'b'::VARCHAR AS s
+) TO 's3://${LANCE_S3_BUCKET}/${LANCE_S3_WRITE_DATASET_PREFIX}' (FORMAT lance, mode 'overwrite');
+
+query I
+SELECT count(*) FROM 's3://${LANCE_S3_BUCKET}/${LANCE_S3_WRITE_DATASET_PREFIX}';
+----
+2
+
+query I
+SELECT sum(id) FROM 's3://${LANCE_S3_BUCKET}/${LANCE_S3_WRITE_DATASET_PREFIX}';
+----
+3

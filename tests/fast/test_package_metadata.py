@@ -381,7 +381,7 @@ def test_release_runtime_is_self_contained_by_default():
         ).fetchall()
     }
 
-    expected_extensions = {"core_functions", "httpfs", "icu", "json", "parquet"}
+    expected_extensions = {"core_functions", "httpfs", "icu", "json", "lance", "parquet"}
     if platform.system() == "Linux" and sys.maxsize > 2**32:
         expected_extensions.add("jemalloc")
 
@@ -394,10 +394,11 @@ def test_release_runtime_is_self_contained_by_default():
     assert all(installed and loaded for installed, loaded, _ in static_extensions.values())
 
     source_id = _expected_duckdb_source_id(REPOSITORY_ROOT)[:10]
-    in_tree_extensions = expected_extensions - {"httpfs"}
+    in_tree_extensions = expected_extensions - {"httpfs", "lance"}
     assert {name: static_extensions[name][2] for name in in_tree_extensions} == {
         name: source_id for name in in_tree_extensions
     }
+    assert static_extensions["lance"][2] == "63c2446f7d9c8a59fd73a49fededb0c3725cc192"
 
 
 @pytest.mark.parametrize(

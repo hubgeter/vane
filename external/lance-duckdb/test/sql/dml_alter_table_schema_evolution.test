@@ -1,0 +1,153 @@
+# name: test/sql/dml_alter_table_schema_evolution.test
+# description: ALTER TABLE schema evolution for attached Lance tables
+# group: [sql]
+
+require lance
+
+statement ok
+COPY (SELECT 1::BIGINT AS id) TO 'test/.tmp/alter_table_schema_evolution_seed.lance' (FORMAT lance, mode 'overwrite');
+
+statement ok
+ATTACH 'test/.tmp' AS ns (TYPE LANCE);
+
+statement ok
+CREATE OR REPLACE TABLE ns.main.alter_table_schema_evolution AS
+  SELECT 1::BIGINT AS id, 10::INTEGER AS age, 0.5::DOUBLE AS score
+  UNION ALL SELECT 2::BIGINT, 20::INTEGER, 1.5::DOUBLE
+  UNION ALL SELECT 3::BIGINT, 30::INTEGER, 2.5::DOUBLE;
+
+query I
+SELECT count(*) FROM ns.main.alter_table_schema_evolution
+----
+3
+
+statement ok
+COMMENT ON TABLE ns.main.alter_table_schema_evolution IS 'table comment';
+
+query T
+SELECT comment FROM duckdb_tables()
+WHERE database_name = 'ns'
+  AND schema_name = 'main'
+  AND table_name = 'alter_table_schema_evolution';
+----
+table comment
+
+statement ok
+ALTER TABLE ns.main.alter_table_schema_evolution
+  ADD COLUMN age_plus_one BIGINT;
+
+statement ok
+UPDATE ns.main.alter_table_schema_evolution
+SET age_plus_one = age + 1;
+
+query I
+SELECT sum(age_plus_one) FROM ns.main.alter_table_schema_evolution
+----
+63
+
+statement ok
+ALTER TABLE ns.main.alter_table_schema_evolution ADD COLUMN const_col INTEGER DEFAULT 42;
+
+query I
+SELECT sum(const_col) FROM ns.main.alter_table_schema_evolution
+----
+126
+
+statement ok
+COMMENT ON COLUMN ns.main.alter_table_schema_evolution.age_plus_one IS 'col comment';
+
+query T
+SELECT comment FROM duckdb_columns()
+WHERE database_name = 'ns'
+  AND schema_name = 'main'
+  AND table_name = 'alter_table_schema_evolution'
+  AND column_name = 'age_plus_one';
+----
+col comment
+
+statement ok
+CREATE INDEX age_idx ON 'test/.tmp/alter_table_schema_evolution.lance' (age) USING BTREE;
+
+query TTTIT
+SHOW INDEXES ON 'test/.tmp/alter_table_schema_evolution.lance';
+----
+age_idx	<REGEX>:.*	age	<REGEX>:[0-9]+	<REGEX>:.*
+
+statement ok
+ALTER TABLE ns.main.alter_table_schema_evolution RENAME COLUMN score TO score2;
+
+query TTTIT
+SHOW INDEXES ON 'test/.tmp/alter_table_schema_evolution.lance';
+----
+age_idx	<REGEX>:.*	age	<REGEX>:[0-9]+	<REGEX>:.*
+
+statement ok
+ALTER TABLE ns.main.alter_table_schema_evolution ALTER COLUMN const_col SET NOT NULL;
+
+query TT
+SELECT column_name, is_nullable FROM duckdb_columns()
+WHERE database_name = 'ns'
+  AND schema_name = 'main'
+  AND table_name = 'alter_table_schema_evolution'
+  AND column_name = 'const_col';
+----
+const_col	false
+
+statement error
+INSERT INTO ns.main.alter_table_schema_evolution(id, age, score2, age_plus_one, const_col)
+VALUES (4, 40, 42.5, 41, NULL);
+----
+IO Error: Failed to finalize Lance append transaction
+
+statement ok
+ALTER TABLE ns.main.alter_table_schema_evolution ALTER COLUMN const_col DROP NOT NULL;
+
+query TT
+SELECT column_name, is_nullable FROM duckdb_columns()
+WHERE database_name = 'ns'
+  AND schema_name = 'main'
+  AND table_name = 'alter_table_schema_evolution'
+  AND column_name = 'const_col';
+----
+const_col	true
+
+statement error
+ALTER TABLE ns.main.alter_table_schema_evolution ALTER COLUMN age TYPE BIGINT;
+----
+IO Error: Failed to change column type in Lance dataset
+
+query TTTIT
+SHOW INDEXES ON 'test/.tmp/alter_table_schema_evolution.lance';
+----
+age_idx	<REGEX>:.*	age	<REGEX>:[0-9]+	<REGEX>:.*
+
+statement ok
+DROP INDEX age_idx ON ns.main.alter_table_schema_evolution;
+
+statement ok
+ALTER TABLE ns.main.alter_table_schema_evolution ALTER COLUMN age TYPE BIGINT;
+
+query TTTIT
+SHOW INDEXES ON 'test/.tmp/alter_table_schema_evolution.lance';
+----
+
+query I
+SELECT sum(age) FROM ns.main.alter_table_schema_evolution
+----
+60
+
+statement ok
+ALTER TABLE ns.main.alter_table_schema_evolution DROP COLUMN score2;
+
+statement error
+SELECT score2 FROM ns.main.alter_table_schema_evolution LIMIT 1;
+----
+Binder Error:
+
+statement error
+SELECT score2 FROM ns.main.alter_table_schema_evolution LIMIT 1;
+----
+Binder Error:
+
+statement ok
+DETACH ns;

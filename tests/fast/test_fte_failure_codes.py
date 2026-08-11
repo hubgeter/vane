@@ -123,6 +123,48 @@ def test_exception_failure_payload_reads_implicit_memory_exception_context():
     assert failure["error_code"] == "OUT_OF_MEMORY"
 
 
+@pytest.mark.parametrize(
+    ("context", "expected_retryable"),
+    [
+        ({"single_commit_writer": "true"}, True),
+        (
+            {
+                "single_commit_writer": "true",
+                "single_commit_writer_started": "true",
+            },
+            False,
+        ),
+    ],
+)
+def test_single_commit_writer_failure_retry_boundary(context, expected_retryable):
+    async def run_task():
+        async def execute_fn(_request):
+            raise RuntimeError("injected writer failure")
+
+        execution = FteTaskExecution(
+            {
+                "task_id": "q-lance-writer.0.0.0",
+                "context": context,
+            },
+            execute_fn,
+            default_task_memory_bytes=1,
+        )
+        execution.start()
+        assert execution._future is not None
+        await execution._future
+        return execution.status
+
+    status = asyncio.run(run_task())
+
+    assert status.state == FteTaskState.FAILED
+    assert status.failure is not None
+    assert _failure_allows_retry(status.failure) is expected_retryable
+    if expected_retryable:
+        assert "retryable" not in status.failure
+    else:
+        assert status.failure["retryable"] is False
+
+
 def test_exception_failure_payload_ignores_suppressed_memory_exception_context():
     try:
         raise OutOfMemoryException("duckdb exhausted memory")

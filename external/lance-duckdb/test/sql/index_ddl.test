@@ -1,0 +1,355 @@
+# name: test/sql/index_ddl.test
+# description: CREATE/DROP/SHOW index DDL for Lance datasets
+# group: [sql]
+
+require lance
+
+statement ok
+COPY (SELECT * FROM 'test/data/bigann_tiny/base.lance')
+TO 'test/.tmp/index_ddl_base.lance' (FORMAT lance, mode 'overwrite');
+
+query TTTIT
+SHOW INDEXES ON 'test/.tmp/index_ddl_base.lance';
+----
+
+statement ok
+CREATE INDEX vec_idx ON 'test/.tmp/index_ddl_base.lance' (vec)
+USING IVF_FLAT WITH (num_partitions=1, metric_type='l2');
+
+query TTTIT
+SHOW INDEXES ON 'test/.tmp/index_ddl_base.lance';
+----
+vec_idx	<REGEX>:.*	vec	2048	<REGEX>:.*
+
+statement ok
+ATTACH 'test/.tmp' AS ns (TYPE LANCE);
+
+statement ok
+CREATE INDEX attached_label_idx ON ns.main.index_ddl_base (label) USING BTREE;
+
+query TTTIT
+SHOW INDEXES ON ns.main.index_ddl_base;
+----
+attached_label_idx	<REGEX>:.*	label	2048	<REGEX>:.*
+vec_idx	<REGEX>:.*	vec	2048	<REGEX>:.*
+
+statement ok
+use ns;
+
+statement ok
+CREATE INDEX attached_label_idx_1 ON index_ddl_base (label) USING BTREE;
+
+query TTTIT
+SHOW INDEXES ON ns.main.index_ddl_base;
+----
+attached_label_idx	<REGEX>:.*	label	2048	<REGEX>:.*
+attached_label_idx_1	<REGEX>:.*	label	2048	<REGEX>:.*
+vec_idx	<REGEX>:.*	vec	2048	<REGEX>:.*
+
+statement ok
+DROP INDEX attached_label_idx_1 ON index_ddl_base;
+
+
+query TTTIT
+SHOW INDEXES ON ns.main.index_ddl_base;
+----
+attached_label_idx	<REGEX>:.*	label	2048	<REGEX>:.*
+vec_idx	<REGEX>:.*	vec	2048	<REGEX>:.*
+
+statement ok
+use memory;
+
+statement ok
+DETACH ns;
+
+query II
+EXPLAIN (FORMAT JSON)
+SELECT id
+FROM lance_vector_search(
+  'test/.tmp/index_ddl_base.lance',
+  'vec',
+  [
+    0.32245764,
+    0.2814153,
+    0.08346437,
+    0.28065863,
+    0.2566661,
+    -0.47035545,
+    -0.9935358,
+    0.09578487,
+    0.000604047,
+    -0.37332273,
+    0.12592472,
+    -0.3458825,
+    -0.2536356,
+    -0.3673502,
+    -0.68120277,
+    0.41665298
+  ]::FLOAT[16],
+  k = 1,
+  nprobs = 2,
+  refine_factor = 3,
+  use_index = true,
+  explain_verbose = true
+);
+----
+physical_plan	<REGEX>:[\s\S]*ANNSubIndex: name=vec_idx, k=3[\s\S]*minimum_nprobes=2[\s\S]*maximum_nprobes=Some\(2\)[\s\S]*
+
+query II
+EXPLAIN (FORMAT JSON)
+SELECT id
+FROM lance_vector_search(
+  'test/.tmp/index_ddl_base.lance',
+  'vec',
+  [
+    0.32245764,
+    0.2814153,
+    0.08346437,
+    0.28065863,
+    0.2566661,
+    -0.47035545,
+    -0.9935358,
+    0.09578487,
+    0.000604047,
+    -0.37332273,
+    0.12592472,
+    -0.3458825,
+    -0.2536356,
+    -0.3673502,
+    -0.68120277,
+    0.41665298
+  ]::FLOAT[16],
+  k = 1,
+  use_index = false,
+  explain_verbose = true
+);
+----
+physical_plan	<REGEX>:[\s\S]*KNNVectorDistance[\s\S]*
+
+query I
+WITH got AS (
+  SELECT id
+  FROM lance_vector_search(
+    'test/.tmp/index_ddl_base.lance',
+    'vec',
+    [
+      0.32245764,
+      0.2814153,
+      0.08346437,
+      0.28065863,
+      0.2566661,
+      -0.47035545,
+      -0.9935358,
+      0.09578487,
+      0.000604047,
+      -0.37332273,
+      0.12592472,
+      -0.3458825,
+      -0.2536356,
+      -0.3673502,
+      -0.68120277,
+      0.41665298
+    ]::FLOAT[16],
+    k = 10,
+    use_index = true
+  )
+)
+SELECT count(*) FROM got;
+----
+10
+
+query I
+WITH got AS (
+  SELECT r.id AS id
+  FROM lance_vector_search(
+    'test/.tmp/index_ddl_base.lance',
+    'vec',
+    [
+      0.32245764,
+      0.2814153,
+      0.08346437,
+      0.28065863,
+      0.2566661,
+      -0.47035545,
+      -0.9935358,
+      0.09578487,
+      0.000604047,
+      -0.37332273,
+      0.12592472,
+      -0.3458825,
+      -0.2536356,
+      -0.3673502,
+      -0.68120277,
+      0.41665298
+    ]::FLOAT[16],
+    k = 10,
+    use_index = true
+  ) r
+  ORDER BY r._distance, r.id
+  LIMIT 1
+),
+exp AS (
+  SELECT id
+  FROM 'test/data/bigann_tiny/groundtruth_all_top10.lance'
+  WHERE qid = 0
+)
+SELECT count(*) FROM got WHERE id IN (SELECT id FROM exp);
+----
+1
+
+statement ok
+CREATE INDEX label_idx ON 'test/.tmp/index_ddl_base.lance' (label)
+USING BTREE;
+
+query I
+SELECT count(*) FROM 'test/.tmp/index_ddl_base.lance' WHERE label = 1;
+----
+256
+
+query II
+EXPLAIN (FORMAT JSON)
+SELECT count(*) FROM 'test/.tmp/index_ddl_base.lance' WHERE label = 1;
+----
+physical_plan	<REGEX>:[\s\S]*"Lance Exec IR Bytes": "[1-9][0-9]*"[\s\S]*
+
+query II
+EXPLAIN (FORMAT JSON)
+SELECT count(*) FROM 'test/.tmp/index_ddl_base.lance' WHERE label % 2 = 1;
+----
+physical_plan	<REGEX>:[\s\S]*"Lance Pushed Filter Parts": "0"[\s\S]*
+
+# Nested field index lifecycle: creation target, escaped literal-dot path,
+# same-leaf disambiguation, and canonical metadata display.
+statement ok
+COPY (
+  SELECT
+    {'value': i, 'same': i + 10} AS left_struct,
+    {'value': i * 2, 'same': i + 20} AS right_struct,
+    {'literal.dot': i + 100} AS dotted,
+    {'a,b': i + 200, 'a)b': i + 300, 'a`b': i + 400} AS escaped
+  FROM range(8) tbl(i)
+) TO 'test/.tmp/index_ddl_nested.lance' (FORMAT lance, mode 'overwrite');
+
+statement ok
+CREATE INDEX left_value_idx ON 'test/.tmp/index_ddl_nested.lance' (left_struct.value)
+USING BTREE;
+
+statement ok
+CREATE INDEX dotted_literal_idx ON 'test/.tmp/index_ddl_nested.lance' (dotted.`literal.dot`)
+USING BTREE;
+
+statement ok
+CREATE INDEX path_comma_idx ON 'test/.tmp/index_ddl_nested.lance' (escaped.`a,b`)
+USING BTREE;
+
+statement ok
+CREATE INDEX path_paren_idx ON 'test/.tmp/index_ddl_nested.lance' (escaped.`a)b`)
+USING BTREE;
+
+statement ok
+CREATE INDEX path_backtick_idx ON 'test/.tmp/index_ddl_nested.lance' (escaped.`a``b`)
+USING BTREE;
+
+query TTTIT
+SHOW INDEXES ON 'test/.tmp/index_ddl_nested.lance';
+----
+dotted_literal_idx	<REGEX>:.*	dotted.`literal.dot`	8	<REGEX>:.*|NULL
+left_value_idx	<REGEX>:.*	left_struct.value	8	<REGEX>:.*|NULL
+path_backtick_idx	<REGEX>:.*	escaped.`a``b`	8	<REGEX>:.*|NULL
+path_comma_idx	<REGEX>:.*	escaped.`a,b`	8	<REGEX>:.*|NULL
+path_paren_idx	<REGEX>:.*	escaped.`a)b`	8	<REGEX>:.*|NULL
+
+statement ok
+ATTACH 'test/.tmp' AS nested_ns (TYPE LANCE);
+
+query II
+EXPLAIN (FORMAT JSON)
+SELECT count(*) FROM nested_ns.main.index_ddl_nested WHERE right_struct.value = 4;
+----
+physical_plan	<REGEX>:[\s\S]*"Lance Dataset Cache Hit": "false"[\s\S]*
+
+statement ok
+CREATE INDEX right_value_idx ON nested_ns.main.index_ddl_nested (index_ddl_nested.right_struct.value)
+USING BTREE;
+
+query TTTIT
+SHOW INDEXES ON nested_ns.main.index_ddl_nested;
+----
+dotted_literal_idx	<REGEX>:.*	dotted.`literal.dot`	8	<REGEX>:.*|NULL
+left_value_idx	<REGEX>:.*	left_struct.value	8	<REGEX>:.*|NULL
+path_backtick_idx	<REGEX>:.*	escaped.`a``b`	8	<REGEX>:.*|NULL
+path_comma_idx	<REGEX>:.*	escaped.`a,b`	8	<REGEX>:.*|NULL
+path_paren_idx	<REGEX>:.*	escaped.`a)b`	8	<REGEX>:.*|NULL
+right_value_idx	<REGEX>:.*	right_struct.value	8	<REGEX>:.*|NULL
+
+query II
+EXPLAIN (ANALYZE, FORMAT JSON)
+SELECT count(*) FROM nested_ns.main.index_ddl_nested WHERE right_struct.value = 4;
+----
+analyzed_plan	<REGEX>:[\s\S]*"Lance Dataset Cache Hit": "false"[\s\S]*"Lance Scan Mode": "dataset"[\s\S]*
+
+statement error
+CREATE INDEX ambiguous_leaf_idx ON 'test/.tmp/index_ddl_nested.lance' (value)
+USING BTREE;
+----
+IO Error: Failed to create Lance index
+
+statement ok
+DETACH nested_ns;
+
+statement ok
+COPY (SELECT * FROM 'test/data/bigann_tiny/base.lance')
+TO 'test/.tmp/index_ddl_untrained.lance' (FORMAT lance, mode 'overwrite');
+
+statement ok
+CREATE INDEX label_idx_untrained ON 'test/.tmp/index_ddl_untrained.lance' (label)
+USING BTREE WITH (train=false);
+
+query TTTIT
+SHOW INDEXES ON 'test/.tmp/index_ddl_untrained.lance';
+----
+label_idx_untrained	<REGEX>:.*	label	0	<REGEX>:.*
+
+statement ok
+DROP INDEX label_idx_untrained ON 'test/.tmp/index_ddl_untrained.lance';
+
+query TTTIT
+SHOW INDEXES ON 'test/.tmp/index_ddl_untrained.lance';
+----
+
+statement ok
+COPY (
+  SELECT 1::BIGINT AS id, 'document one'::VARCHAR AS text
+  UNION ALL
+  SELECT 2::BIGINT AS id, 'document two'::VARCHAR AS text
+  UNION ALL
+  SELECT 3::BIGINT AS id, 'other text'::VARCHAR AS text
+) TO 'test/.tmp/index_ddl_text.lance' (FORMAT lance, mode 'overwrite');
+
+statement ok
+CREATE INDEX text_idx ON 'test/.tmp/index_ddl_text.lance' (text)
+USING INVERTED;
+
+query I
+SELECT count(*)
+FROM lance_fts('test/.tmp/index_ddl_text.lance', 'text', 'document', k = 10);
+----
+2
+
+query TTTIT
+SHOW INDEXES ON 'test/.tmp/index_ddl_text.lance';
+----
+text_idx	<REGEX>:.*	text	3	<REGEX>:.*
+
+statement ok
+DROP INDEX text_idx ON 'test/.tmp/index_ddl_text.lance';
+
+query TTTIT
+SHOW INDEXES ON 'test/.tmp/index_ddl_text.lance';
+----
+
+query I
+SELECT count(*)
+FROM lance_fts('test/.tmp/index_ddl_text.lance', 'text', 'document', k = 10);
+----
+2

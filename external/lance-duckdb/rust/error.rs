@@ -1,0 +1,123 @@
+use std::cell::RefCell;
+use std::ffi::{c_char, CString};
+use std::ptr;
+
+#[repr(i32)]
+#[derive(Clone, Copy, Debug)]
+pub enum ErrorCode {
+    InvalidArgument = 1,
+    Utf8 = 2,
+    Runtime = 3,
+
+    DatasetOpen = 4,
+    DatasetCountRows = 5,
+    FragmentScan = 6,
+
+    StreamCreate = 7,
+    StreamNext = 8,
+    SchemaExport = 9,
+    BatchExport = 10,
+
+    KnnSchema = 11,
+    KnnStreamCreate = 12,
+    ExplainPlan = 13,
+    FtsSchema = 14,
+    FtsStreamCreate = 15,
+    DatasetScan = 16,
+    HybridStreamCreate = 17,
+
+    DatasetWriteOpen = 18,
+    DatasetWriteBatch = 19,
+    DatasetWriteFinish = 20,
+
+    NamespaceListTables = 21,
+    NamespaceDescribeTable = 22,
+    DirNamespaceListTables = 23,
+    DatasetWriteFinishUncommitted = 24,
+    DatasetCommitTransaction = 25,
+    DirNamespaceDropTable = 26,
+
+    DatasetDelete = 27,
+    DatasetUpdateOverwrite = 28,
+
+    DatasetCreateIndex = 29,
+    DatasetDropIndex = 30,
+    DatasetDescribeIndices = 31,
+    DatasetOptimizeIndices = 32,
+    IndexStreamCreate = 34,
+
+    DatasetAddColumns = 35,
+    DatasetDropColumns = 36,
+    DatasetAlterColumns = 37,
+    DatasetUpdateMetadata = 38,
+    DatasetUpdateConfig = 39,
+    DatasetUpdateSchemaMetadata = 40,
+    DatasetUpdateFieldMetadata = 41,
+    DatasetCompactFiles = 42,
+    DatasetCleanupOldVersions = 43,
+    DatasetListKeyValues = 44,
+    DatasetListIndices = 45,
+    DatasetCreateScalarIndex = 46,
+    DatasetCalculateDataStats = 47,
+    DatasetTake = 48,
+
+    NamespaceDescribeTableInfo = 49,
+    NamespaceCreateEmptyTable = 50,
+    NamespaceDropTable = 51,
+    Exec = 52,
+    DatasetMerge = 53,
+    NamespaceQueryTable = 54,
+}
+
+struct LastError {
+    code: i32,
+    message: CString,
+}
+
+thread_local! {
+    static LAST_ERROR: RefCell<Option<LastError>> = const { RefCell::new(None) };
+}
+
+fn sanitize_message(message: &str) -> CString {
+    match CString::new(message) {
+        Ok(v) => v,
+        Err(_) => CString::new(message.replace('\0', "\\0"))
+            .unwrap_or_else(|_| CString::new("invalid error message").unwrap()),
+    }
+}
+
+pub fn clear_last_error() {
+    LAST_ERROR.with(|e| {
+        *e.borrow_mut() = None;
+    });
+}
+
+pub fn set_last_error(code: ErrorCode, message: impl AsRef<str>) {
+    let code = code as i32;
+    let message = sanitize_message(message.as_ref());
+    LAST_ERROR.with(|e| {
+        *e.borrow_mut() = Some(LastError { code, message });
+    });
+}
+
+#[no_mangle]
+pub extern "C" fn lance_last_error_code() -> i32 {
+    LAST_ERROR.with(|e| e.borrow().as_ref().map(|v| v.code).unwrap_or(0))
+}
+
+#[no_mangle]
+pub extern "C" fn lance_last_error_message() -> *const c_char {
+    LAST_ERROR.with(|e| match e.borrow_mut().take() {
+        Some(err) => err.message.into_raw() as *const c_char,
+        None => ptr::null(),
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn lance_free_string(s: *const c_char) {
+    if !s.is_null() {
+        unsafe {
+            let _ = CString::from_raw(s as *mut c_char);
+        }
+    }
+}

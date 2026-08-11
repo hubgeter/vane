@@ -1237,6 +1237,18 @@ void DuckDBPyConnection::Initialize(py::handle &m) {
 	connection_module.def("__del__", &DuckDBPyConnection::Close);
 
 	InitializeConnectionMethods(connection_module);
+	connection_module.def(
+	    "read_lance",
+	    [](DuckDBPyConnection &connection, const string &uri) {
+		    // Acquire before binding so VACUUM cannot pass between snapshot
+		    // selection and lease registration. The dependency follows derived
+		    // relations through their child plan and releases on destruction.
+		    auto lease = py::module_::import("vane.lance._coordinator").attr("_SnapshotLease")(uri);
+		    auto relation = connection.TableFunction("__lance_scan", py::make_tuple(uri));
+		    relation->AttachLanceSnapshotLease(std::move(lease));
+		    return relation;
+	    },
+	    "Create a relation over one fixed Lance dataset snapshot", py::arg("uri"));
 	connection_module.def_property_readonly("description", &DuckDBPyConnection::GetDescription,
 	                                        "Get result set attributes, mainly column names");
 	connection_module.def_property_readonly("rowcount", &DuckDBPyConnection::GetRowcount, "Get result set row count");

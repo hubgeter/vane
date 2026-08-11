@@ -10,6 +10,7 @@
 #include "duckdb/common/multi_file/multi_file_states.hpp"
 #include "duckdb/execution/physical_plan.hpp"
 #include "duckdb/function/extension_file_list_provider.hpp"
+#include "duckdb/function/extension_scan_split_provider.hpp"
 #include "duckdb/main/database.hpp"
 
 #include <algorithm>
@@ -244,6 +245,39 @@ std::vector<ScanTaskDescriptor> MakeTableScanTasks(const PhysicalTableScan &scan
 
 	if (!scan.bind_data) {
 		throw BinderException("MakeTableScanTasks: bind_data is nullptr for function '%s'", scan.function.name);
+	}
+
+	if (auto *split_provider = dynamic_cast<ExtensionScanSplitProvider *>(scan.bind_data.get())) {
+		auto splits = split_provider->GetScanSplits();
+		if (splits.empty()) {
+			ScanTaskDescriptor task;
+			task.cpu_slots = std::max<idx_t>(1, split_provider->GetTaskCpuSlots());
+			task.source_task_partition_id = 0;
+			tasks.push_back(std::move(task));
+			return tasks;
+		}
+		vector<uint64_t> weights;
+		weights.reserve(splits.size());
+		for (const auto &split : splits) {
+			weights.push_back(split.estimated_bytes);
+		}
+		auto target_count = ResolveScanTaskTargetCount(splits.size(), exec_cfg);
+		auto groups = GroupWeightedIndexesByTargetCount(weights, target_count);
+		const auto task_cpu_slots = std::max<idx_t>(1, split_provider->GetTaskCpuSlots());
+		tasks.reserve(groups.size());
+		for (const auto &group : groups) {
+			ScanTaskDescriptor task;
+			task.cpu_slots = task_cpu_slots;
+			for (auto index : group) {
+				const auto &split = splits[static_cast<size_t>(index)];
+				task.opaque_splits.push_back(split.payload);
+				task.estimated_cardinality += split.estimated_cardinality;
+				task.estimated_bytes += split.estimated_bytes;
+			}
+			task.source_task_partition_id = tasks.size();
+			tasks.push_back(std::move(task));
+		}
+		return tasks;
 	}
 
 	vector<OpenFileInfo> files;

@@ -1,0 +1,61 @@
+[package]
+name = "lance_duckdb_ffi"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "lance_duckdb_ffi"
+crate-type = ["staticlib"]
+path = "rust/lib.rs"
+
+[profile.release]
+lto = "thin"
+strip = true
+panic = "abort"
+
+[profile.dev]
+panic = "abort"
+
+[dependencies]
+
+# Vane's first supported storage surface is local files plus AWS/S3 (including
+# S3-compatible endpoints).  Keep every optional cloud integration disabled
+# except AWS, and only compile the REST namespace implementation.
+lance = { version = "9.0.0", default-features = false, features = ["aws"] }
+lance-arrow = { version = "9.0.0", default-features = false }
+lance-core = { version = "9.0.0", default-features = false }
+lance-index = { version = "9.0.0", default-features = false }
+lance-linalg = { version = "9.0.0", default-features = false }
+lance-namespace = { version = "9.0.0", default-features = false }
+lance-namespace-impls = { version = "9.0.0", default-features = false, features = ["rest"] }
+lance-table = { version = "9.0.0", default-features = false }
+
+arrow = { version = "58.0.0", features = ["ffi"] }
+arrow-array = "58.0.0"
+arrow-schema = "58.0.0"
+
+datafusion = "54.0.0"
+datafusion-common = "54.0.0"
+datafusion-expr = "54.0.0"
+datafusion-functions = "54.0.0"
+datafusion-sql = "54.0.0"
+
+anyhow = "1.0"
+async-trait = "0.1"
+bzip2-sys = { version = "0.1.13", features = ["static"] }
+chrono = "0.4"
+futures = "0.3"
+roaring = "0.11.3"
+serde_json = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+snafu = "0.8.6"
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+rand = "0.8"
+
+# Security backports for transitive storage crates whose released dependency
+# constraints still select vulnerable quick-xml 0.39.x.  The local sources are
+# exact crates.io releases with only their quick-xml requirement raised.
+[patch.crates-io]
+object_store = { path = "vendor-patches/object_store-0.13.2" }
+opendal-core = { path = "vendor-patches/opendal-core-0.57.0" }
+opendal-service-s3 = { path = "vendor-patches/opendal-service-s3-0.57.0" }

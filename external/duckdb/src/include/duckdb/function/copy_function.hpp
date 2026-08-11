@@ -1,3 +1,9 @@
+// SPDX-FileCopyrightText: 2018-2025 Stichting DuckDB Foundation
+// SPDX-FileCopyrightText: 2026 Vane contributors
+// SPDX-License-Identifier: MIT
+//
+// Modified by Vane contributors.
+
 //===----------------------------------------------------------------------===//
 //                         DuckDB
 //
@@ -123,7 +129,15 @@ struct CopyOptionsInput {
 	case_insensitive_map_t<CopyOption> &options;
 };
 
-enum class CopyFunctionExecutionMode { REGULAR_COPY_TO_FILE, PARALLEL_COPY_TO_FILE, BATCH_COPY_TO_FILE };
+enum class CopyFunctionExecutionMode {
+	REGULAR_COPY_TO_FILE,
+	PARALLEL_COPY_TO_FILE,
+	BATCH_COPY_TO_FILE,
+	//! Gather all input partitions and execute exactly one transaction-owning
+	//! writer task. Distributed runtimes must never retry that task once it has
+	//! crossed their durable writer-started barrier.
+	SINGLE_COMMIT_WRITER
+};
 
 typedef BoundStatement (*copy_to_plan_t)(Binder &binder, CopyStatement &stmt);
 typedef void (*copy_options_t)(ClientContext &context, CopyOptionsInput &input);
