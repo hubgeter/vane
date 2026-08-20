@@ -23,6 +23,7 @@ license-files = [
     "external/duckdb/third_party/thrift/thrift/LICENSE",
     "external/duckdb/extension/icu/third_party/icu/LICENSE",
     "external/duckdb/extension/jemalloc/jemalloc/LICENSE",
+    "LICENSES/lance-rust-dependencies.txt",
 ]
 keywords = ["Vane", "DuckDB", "Ray", "Distributed", "Database", "SQL", "OLAP"]
 requires-python = ">=3.10,<3.15"
@@ -125,7 +126,7 @@ exclude = [
 ]
 
 [tool.scikit-build.cmake.define]
-BUILD_EXTENSIONS = "core_functions;json;parquet;icu;jemalloc;httpfs"
+BUILD_EXTENSIONS = "core_functions;json;parquet;icu;jemalloc;httpfs;lance"
 
 # Override: if COVERAGE is set then:
 # - we create a RelWithDebInfo build
@@ -191,6 +192,7 @@ include = [
     "/CMakeLists.txt",
     "/vcpkg.json",
     "/scripts/bootstrap_manylinux_bison.sh",
+    "/scripts/bootstrap_manylinux_rust.sh",
     "/scripts/bootstrap_vcpkg.sh",
     "cmake/**",
     "/scripts/check_release_artifacts.py",
@@ -198,6 +200,7 @@ include = [
     "/scripts/run_release_tests.sh",
     "/scripts/resolve_duckdb_fork_version.py",
     "/scripts/sync_duckdb_source_id.py",
+    "/scripts/sync_lance_cargo_licenses.py",
     "/scripts/sync_vcpkg_licenses.py",
     "/scripts/verify_base_install.py",
     "/scripts/verify_duckdb_coexistence.py",
@@ -212,6 +215,8 @@ include = [
     "/tests/fast/test_transformers_provider_security.py",
     "/tests/fast/test_vane_config.py",
     "/tests/fast/test_expression_udf_contracts.py",
+    "/tests/fast/test_lance.py",
+    "/tests/fast/test_lance_coordinator.py",
     "/tests/fast/test_local_e2e.py",
     "/tests/fast/test_ray_cpp_bindings.py",
     "/tests/fast/test_ray_remote_exceptions.py",
@@ -641,6 +646,8 @@ test-requires = [
 [tool.cibuildwheel.linux]
 before-all = [
     "yum install -y autoconf automake bison ccache curl flex git libtool make perl pkgconfig tar unzip which zip",
+    # The pinned Lance Cargo.lock currently requires Rust 1.94.1.
+    "bash {package}/scripts/bootstrap_manylinux_rust.sh",
     # AlmaLinux 8 ships Bison 3.0.4, while Thrift 0.23 requires --file-prefix-map.
     "bash {package}/scripts/bootstrap_manylinux_bison.sh",
     "bash {package}/scripts/bootstrap_vcpkg.sh {package}",

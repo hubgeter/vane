@@ -671,9 +671,24 @@ void register_ray_bindings(py::module_ &mod) {
 		    auto &connection_wrapper = ExtractPyConnectionWrapper(connection);
 		    CloseOpenPythonConnectionResult(connection_wrapper);
 		    if (!include_snapshot_secrets) {
-			    py::dict empty_snapshot;
-			    empty_snapshot[py::str("secrets")] = py::list();
-			    ApplySecretSnapshot(*connection_wrapper.con.GetConnection().context, empty_snapshot);
+			    py::dict lance_snapshot;
+			    py::list lance_secrets;
+			    auto snapshot_dict = snapshot.cast<py::dict>();
+			    if (snapshot_dict.contains(py::str("secrets")) && !snapshot_dict[py::str("secrets")].is_none()) {
+				    for (auto item : snapshot_dict[py::str("secrets")].cast<py::list>()) {
+					    auto secret = py::reinterpret_borrow<py::dict>(item);
+					    if (!secret.contains(py::str("type")) || !py::isinstance<py::str>(secret[py::str("type")])) {
+						    throw InvalidInputException("Connection snapshot secret entry is missing its type");
+					    }
+					    auto type = secret[py::str("type")].cast<string>();
+					    if (StringUtil::CIEquals(type, "lance") ||
+					        StringUtil::CIEquals(type, "lance_namespace_replay")) {
+						    lance_secrets.append(secret);
+					    }
+				    }
+			    }
+			    lance_snapshot[py::str("secrets")] = std::move(lance_secrets);
+			    ApplySecretSnapshot(*connection_wrapper.con.GetConnection().context, lance_snapshot);
 			    return;
 		    }
 		    ConnectionSnapshotApplyOptions options;

@@ -40,6 +40,19 @@ Vane does not provide confidentiality between users or jobs in one Ray cluster, 
 
 The worker's Ray private address is used for binding and advertisement by default. Operators may set `VANE_FLIGHT_BIND_HOST=0.0.0.0` when container networking requires a wildcard listener, but `VANE_FLIGHT_ADVERTISE_HOST` must be a routable non-wildcard address. The advertised-host override belongs to the worker node's environment and is not copied from the driver to every worker. Vane rejects this override in a Ray Job or actor runtime environment because Ray inherits those values across nodes. Firewall, Security Group, or NetworkPolicy rules must restrict the configured or dynamically allocated `DUCKDB_FLIGHT_PORT` to the same Ray cluster. Do not expose it through a public Service, Ingress, LoadBalancer, or NodePort.
 
+## Known inherited Lance dependency risk
+
+The pinned lance-duckdb dependency graph currently inherits `quick-xml 0.39.4`
+through `object_store 0.13.2` and OpenDAL `0.57.0`. That release is affected by
+the CPU and memory denial-of-service advisories
+[RUSTSEC-2026-0194](https://rustsec.org/advisories/RUSTSEC-2026-0194.html) and
+[RUSTSEC-2026-0195](https://rustsec.org/advisories/RUSTSEC-2026-0195.html).
+Vane deliberately follows the upstream dependency graph and does not carry a
+local source patch. Until upstream moves to a fixed version, use trusted object
+storage endpoints, restrict worker resources and network access, and treat
+responses from an untrusted S3-compatible or other XML-speaking endpoint as a
+denial-of-service risk.
+
 ## Secure deployment baseline
 
 - Run the driver and workers as unprivileged users in isolated networks.

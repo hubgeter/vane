@@ -8,6 +8,7 @@ The repository also contains substantial code derived from projects with compati
 | --- | --- | --- |
 | Vane-specific code under `vane/` and distributed execution changes | Vane contributors | Apache-2.0 by default |
 | `external/duckdb/` | `duckdb/duckdb` plus Vane-maintained engine customizations | DuckDB MIT license plus the licenses retained in its vendored directories |
+| Build-fetched `lance-duckdb` | `hubgeter/lance-duckdb` commit `856203ca15bdf21e1f6c2962038ccbd4598573b0`, based on `AstroVela/lance-duckdb` commit `63c2446f7d9c8a59fd73a49fededb0c3725cc192` | Apache-2.0; the immutable revision is declared in `cmake/lance_extension_config.cmake` |
 | DuckDB-derived modules and stubs moved under `vane/`, plus `src/vane_py/` | Derived from DuckDB's Python client and subsequently modified for Vane | Original DuckDB portions remain MIT; Vane contributions are Apache-2.0 |
 | Tests and benchmarks derived from DuckDB or other named suites | Their named upstream source | License noted in the source directory or `THIRD_PARTY.md` |
 
@@ -16,6 +17,25 @@ The repository also contains substantial code derived from projects with compati
 New Vane source files use an `Apache-2.0` SPDX identifier. Parent-repository files that combine inherited DuckDB or DuckDB Python client source with Vane modifications use `MIT AND Apache-2.0` and retain both copyright notices. New and modified source in `external/duckdb` remains under that repository's MIT license.
 
 Existing third-party headers are preserved. Unchanged upstream source, vendored dependencies, and generated output are not mechanically relabeled. Run `python3 scripts/check_source_license_headers.py` from the repository root to validate the applicable files.
+
+The Lance SQL extension is maintained independently at
+`https://github.com/hubgeter/lance-duckdb` and fetched by CMake at immutable
+revision `856203ca15bdf21e1f6c2962038ccbd4598573b0`. It is not copied into Vane and
+is not a Git submodule. That revision contains the Vane distributed scan and
+write adapters on top of `AstroVela/lance-duckdb` revision
+`63c2446f7d9c8a59fd73a49fededb0c3725cc192`. The Vane-only revision removes
+the upstream `duckdb` and `extension-ci-tools` gitlinks entirely; the extension
+is compiled directly against Vane's `external/duckdb` and only its static target
+is linked into `vane._native`. `DUCKDB_LANCE_DIRECTORY` may select a local
+checkout for offline or coordinated development, but release builds use the
+declared immutable Git source.
+
+The fork keeps the upstream cloud feature set. Its separate parent commit
+`f83fa8cac403ee8c05e627bfc159380e04a2f36a` regenerates the stale upstream lock
+file: the upstream manifest requires Lance 9 and DataFusion 54 while the
+checked-in lock still resolved Lance 8 and DataFusion 53. That lock refresh
+does not patch crate source and deliberately retains the upstream `quick-xml`
+versions documented in `SECURITY.md`.
 
 The DuckDB engine is imported under `external/duckdb` as a squashed Git subtree
 from `https://github.com/duckdb/duckdb.git`. Subtree metadata records the exact

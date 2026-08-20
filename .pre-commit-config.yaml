@@ -1,4 +1,4 @@
-exclude: ^external/duckdb/
+exclude: ^external/(duckdb|lance-duckdb)/
 
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
@@ -8,6 +8,7 @@ repos:
         args: ["--allow-multiple-documents"]
       - id: check-toml
       - id: check-added-large-files
+        exclude: ^LICENSES/lance-rust-dependencies\.txt$
       - id: detect-private-key
       - id: check-merge-conflict
       - id: forbid-new-submodules

@@ -17,6 +17,7 @@ from vane._ray_cxx import require_ray_cxx_attr
 from vane._vane_session import ensure_vane_session_dir
 from vane.runners.copy_outcome import CopyOutcomeUnknownError
 from vane.runners.fte.backends.native import NativeFteWorkerManagerBackend
+from vane.runners.fte.fte_types import FteTaskAttemptId
 from vane.runners.fte.memory_config import apply_duckdb_memory_limit
 from vane.runners.progress import ProgressRenderer, build_progress_snapshot, progress_enabled
 from vane.runners.runner import Runner
@@ -344,6 +345,8 @@ class _InProcessFragmentExecutor:
         cursor_registered = False
         try:
             request_payload = dict(request)
+            raw_task_id = request_payload.get("task_id")
+            task_attempt_id = FteTaskAttemptId.coerce(raw_task_id) if raw_task_id is not None else None
             context = NativeFteWorkerManagerBackend.materialize_task_context(
                 request_payload,
                 merge_scan_task_descriptors=require_ray_cxx_attr("merge_scan_task_descriptors"),
@@ -366,7 +369,8 @@ class _InProcessFragmentExecutor:
                 except Exception:
                     pass
                 raise RuntimeError("local fragment executor is closing")
-            return self._get_plan_runner().execute_native(
+            execute_native = self._get_plan_runner().execute_native
+            arguments = (
                 cursor,
                 plan,
                 scan_task_map or None,
@@ -378,6 +382,9 @@ class _InProcessFragmentExecutor:
                 request_payload.get("dynamic_filter_domains"),
                 request_payload.get("native_progress_callback"),
             )
+            if task_attempt_id is None:
+                return execute_native(*arguments)
+            return execute_native(*arguments, runtime_context={"task_id": str(task_attempt_id)})
         finally:
             try:
                 if cursor_registered:

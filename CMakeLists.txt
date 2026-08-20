@@ -102,6 +102,22 @@ if(EXISTS "${_VANE_VCPKG_INSTALLED_DIR}")
       if(_VANE_PREFIX_INDEX EQUAL -1)
         list(APPEND CMAKE_PREFIX_PATH "${_VANE_VCPKG_PREFIX}")
       endif()
+      # Packages such as CURL and gRPC resolve OpenSSL transitively. Keep that
+      # dependency in the same vcpkg prefix: mixing a vcpkg static CURL built
+      # against a newer OpenSSL with the host's shared OpenSSL can leave
+      # unresolved SSL symbols in the final Python extension.
+      if(EXISTS "${_VANE_VCPKG_PREFIX}/share/openssl/OpenSSLConfig.cmake")
+        if(NOT DEFINED OPENSSL_ROOT_DIR)
+          set(OPENSSL_ROOT_DIR
+              "${_VANE_VCPKG_PREFIX}"
+              CACHE PATH "OpenSSL root matching the repo-local vcpkg packages")
+        endif()
+        if(NOT DEFINED OPENSSL_USE_STATIC_LIBS)
+          set(OPENSSL_USE_STATIC_LIBS
+              ON
+              CACHE BOOL "Use the repo-local vcpkg OpenSSL static libraries")
+        endif()
+      endif()
       set(VCPKG_BUILD TRUE)
       message(
         STATUS "Vane: using repo-local vcpkg prefix: ${_VANE_VCPKG_PREFIX}")
@@ -214,10 +230,14 @@ elseif(UNIX AND NOT APPLE)
   # Use a version script to export only the two required symbols. This hides all
   # internal symbols (including statically-linked OpenSSL from httpfs) from the
   # dynamic symbol table, preventing SIGSEGV crashes caused by symbol conflicts
-  # with system OpenSSL loaded by Ray/Python/gRPC in the same process.
+  # with system OpenSSL loaded by Ray/Python/gRPC in the same process. DuckDB's
+  # static build compiles release objects into function/data sections; discard
+  # unreachable sections here so vendored static extensions do not inflate the
+  # published Python wheel with code that cannot be called.
   target_link_options(
     _native
     PRIVATE
+    "LINKER:--gc-sections"
     "LINKER:--version-script=${CMAKE_CURRENT_SOURCE_DIR}/cmake/exported_symbols.version"
   )
 elseif(WIN32)

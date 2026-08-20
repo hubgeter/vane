@@ -182,6 +182,26 @@ assert sorted(row[0] for row in conn.read_parquet(str(dst)).fetchall()) == [0, 1
     subprocess.run([sys.executable, "-c", script], check=True)
 
 
+def test_local_runner_smoke_writes_lance_in_subprocess():
+    script = """
+import pathlib
+import tempfile
+
+import vane
+from vane.runners.local import set_runner_local
+
+tmp = pathlib.Path(tempfile.mkdtemp())
+dst = tmp / "output.lance"
+
+set_runner_local(num_workers=1, max_running_tasks=1)
+conn = vane.connect()
+conn.sql("SELECT * FROM (VALUES (1, 'one'), (2, 'two')) source(id, label)").write_lance(str(dst))
+
+assert conn.read_lance(str(dst)).order("id").fetchall() == [(1, "one"), (2, "two")]
+"""
+    subprocess.run([sys.executable, "-c", script], check=True)
+
+
 def test_local_runner_repartition_write_uses_local_exchange_node_in_subprocess():
     script = """
 import pathlib

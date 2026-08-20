@@ -307,7 +307,8 @@ public:
 
 	unique_ptr<DuckDBPyRelation> View(const string &vname);
 
-	unique_ptr<DuckDBPyRelation> TableFunction(const string &fname, py::object params = py::list());
+	unique_ptr<DuckDBPyRelation> TableFunction(const string &fname, py::object params = py::list(),
+	                                           py::object named_parameters = py::dict());
 
 	unique_ptr<DuckDBPyRelation> FromDF(const PandasDataFrame &value);
 
@@ -330,6 +331,8 @@ public:
 	shared_ptr<DuckDBPyConnection> UnregisterPythonObject(const string &name);
 
 	shared_ptr<DuckDBPyConnection> Begin();
+
+	bool IsAutoCommit();
 
 	shared_ptr<DuckDBPyConnection> Commit();
 

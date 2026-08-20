@@ -731,6 +731,8 @@ static void InitializeConnectionMethods(py::class_<DuckDBPyConnection, shared_pt
 	m.def("torch", &DuckDBPyConnection::FetchPyTorch, "Fetch a result as dict of PyTorch Tensors following execute()");
 	m.def("tf", &DuckDBPyConnection::FetchTF, "Fetch a result as dict of TensorFlow Tensors following execute()");
 	m.def("begin", &DuckDBPyConnection::Begin, "Start a new transaction");
+	m.def("_is_auto_commit", &DuckDBPyConnection::IsAutoCommit,
+	      "Return whether the connection is currently in auto-commit mode");
 	m.def("commit", &DuckDBPyConnection::Commit, "Commit changes performed within a transaction");
 	m.def("rollback", &DuckDBPyConnection::Rollback, "Roll back changes performed within a transaction");
 	m.def("checkpoint", &DuckDBPyConnection::Checkpoint,
@@ -746,7 +748,7 @@ static void InitializeConnectionMethods(py::class_<DuckDBPyConnection, shared_pt
 	m.def("values", &DuckDBPyConnection::Values, "Create a relation object from the passed values");
 	m.def("table_function", &DuckDBPyConnection::TableFunction,
 	      "Create a relation object from the named table function with given parameters", py::arg("name"),
-	      py::arg("parameters") = py::none());
+	      py::arg("parameters") = py::none(), py::kw_only(), py::arg("named_parameters") = py::none());
 	m.def("read_json", &DuckDBPyConnection::ReadJSON, "Create a relation object from the JSON file in 'name'",
 	      py::arg("path_or_buffer"), py::kw_only(), py::arg("columns") = py::none(),
 	      py::arg("sample_size") = py::none(), py::arg("maximum_depth") = py::none(), py::arg("records") = py::none(),
@@ -1237,6 +1239,18 @@ void DuckDBPyConnection::Initialize(py::handle &m) {
 	connection_module.def("__del__", &DuckDBPyConnection::Close);
 
 	InitializeConnectionMethods(connection_module);
+	connection_module.def(
+	    "read_lance",
+	    [](DuckDBPyConnection &connection, const string &uri) {
+		    // Acquire before binding so VACUUM cannot pass between snapshot
+		    // selection and lease registration. The dependency follows derived
+		    // relations through their child plan and releases on destruction.
+		    auto lease = py::module_::import("vane.lance._coordinator").attr("_SnapshotLease")(uri);
+		    auto relation = connection.TableFunction("__lance_scan", py::make_tuple(uri));
+		    relation->AttachLanceSnapshotLease(std::move(lease));
+		    return relation;
+	    },
+	    "Create a relation over one fixed Lance dataset snapshot", py::arg("uri"));
 	connection_module.def_property_readonly("description", &DuckDBPyConnection::GetDescription,
 	                                        "Get result set attributes, mainly column names");
 	connection_module.def_property_readonly("rowcount", &DuckDBPyConnection::GetRowcount, "Get result set row count");
@@ -2506,7 +2520,8 @@ unique_ptr<DuckDBPyRelation> DuckDBPyConnection::View(const string &vname) {
 	return CreateRelation(connection.View(vname));
 }
 
-unique_ptr<DuckDBPyRelation> DuckDBPyConnection::TableFunction(const string &fname, py::object params) {
+unique_ptr<DuckDBPyRelation> DuckDBPyConnection::TableFunction(const string &fname, py::object params,
+                                                               py::object named_parameters) {
 	auto &connection = con.GetConnection();
 	if (params.is_none()) {
 		params = py::list();
@@ -2514,8 +2529,25 @@ unique_ptr<DuckDBPyRelation> DuckDBPyConnection::TableFunction(const string &fna
 	if (!py::is_list_like(params)) {
 		throw InvalidInputException("'params' has to be a list of parameters");
 	}
+	if (named_parameters.is_none()) {
+		named_parameters = py::dict();
+	}
+	if (!py::isinstance<py::dict>(named_parameters)) {
+		throw InvalidInputException("'named_parameters' has to be a dictionary of parameters");
+	}
 
-	return CreateRelation(connection.TableFunction(fname, DuckDBPyConnection::TransformPythonParamList(params)));
+	named_parameter_map_t named_values;
+	for (auto item : py::reinterpret_borrow<py::dict>(named_parameters)) {
+		if (!py::isinstance<py::str>(item.first)) {
+			throw InvalidInputException("'named_parameters' keys have to be strings");
+		}
+		named_values[py::cast<string>(item.first)] = TransformPythonValue(item.second, LogicalType::UNKNOWN, false);
+	}
+
+	auto positional_values = DuckDBPyConnection::TransformPythonParamList(params);
+	D_ASSERT(py::gil_check());
+	py::gil_scoped_release release;
+	return CreateRelation(connection.TableFunction(fname, std::move(positional_values), std::move(named_values)));
 }
 
 unique_ptr<DuckDBPyRelation> DuckDBPyConnection::FromDF(const PandasDataFrame &value) {
@@ -2614,6 +2646,11 @@ shared_ptr<DuckDBPyConnection> DuckDBPyConnection::UnregisterPythonObject(const 
 shared_ptr<DuckDBPyConnection> DuckDBPyConnection::Begin() {
 	ExecuteFromString("BEGIN TRANSACTION");
 	return shared_from_this();
+}
+
+bool DuckDBPyConnection::IsAutoCommit() {
+	auto &connection = con.GetConnection();
+	return connection.context->transaction.IsAutoCommit();
 }
 
 shared_ptr<DuckDBPyConnection> DuckDBPyConnection::Commit() {

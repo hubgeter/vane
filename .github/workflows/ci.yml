@@ -179,6 +179,13 @@ jobs:
       - name: Validate release artifacts
         run: python scripts/check_release_artifacts.py dist/*.tar.gz dist/*.whl
 
+      - name: Verify Lance Rust dependency licenses
+        if: matrix.python-version == '3.12'
+        run: >-
+          python scripts/sync_lance_cargo_licenses.py
+          --manifest build/_deps/lance_extension_fc-src/Cargo.toml
+          --check
+
       - name: Apply private content rules to release artifacts
         if: github.ref == 'refs/heads/main'
         env:

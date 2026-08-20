@@ -13,6 +13,7 @@
 #include "duckdb/main/relation/explain_relation.hpp"
 #include "duckdb/main/relation/filter_relation.hpp"
 #include "duckdb/main/relation/insert_relation.hpp"
+#include "duckdb/main/relation/join_relation.hpp"
 #include "duckdb/main/relation/limit_relation.hpp"
 #include "duckdb/main/relation/repartition_relation.hpp"
 #include "duckdb/main/relation/local_exchange_relation.hpp"
@@ -43,6 +44,7 @@
 #include "duckdb/parser/expression/star_expression.hpp"
 #include "duckdb/parser/expression/subquery_expression.hpp"
 #include "duckdb/parser/parsed_expression_iterator.hpp"
+#include "duckdb/common/set.hpp"
 #include "duckdb/main/relation/join_relation.hpp"
 #include "duckdb/main/relation/value_relation.hpp"
 #include "duckdb/parser/statement/explain_statement.hpp"
@@ -1138,12 +1140,74 @@ void Relation::AddExternalDependency(shared_ptr<ExternalDependency> dependency) 
 
 vector<shared_ptr<ExternalDependency>> Relation::GetAllDependencies() {
 	vector<shared_ptr<ExternalDependency>> all_dependencies;
-	Relation *cur = this;
-	while (cur) {
-		for (auto &dep : cur->external_dependencies) {
-			all_dependencies.push_back(dep);
+	set<Relation *> visited_relations;
+	set<ExternalDependency *> visited_dependencies;
+	vector<Relation *> pending {this};
+	while (!pending.empty()) {
+		auto cur = pending.back();
+		pending.pop_back();
+		if (!cur || !visited_relations.insert(cur).second) {
+			continue;
 		}
-		cur = cur->ChildRelation();
+		for (auto &dep : cur->external_dependencies) {
+			if (visited_dependencies.insert(dep.get()).second) {
+				all_dependencies.push_back(dep);
+			}
+		}
+		switch (cur->type) {
+		case RelationType::PROJECTION_RELATION:
+			pending.push_back(&*cur->Cast<ProjectionRelation>().child);
+			break;
+		case RelationType::EXPLAIN_RELATION:
+			pending.push_back(&*cur->Cast<ExplainRelation>().child);
+			break;
+		case RelationType::CROSS_PRODUCT_RELATION: {
+			auto &cross = cur->Cast<CrossProductRelation>();
+			pending.push_back(&*cross.left);
+			pending.push_back(&*cross.right);
+			break;
+		}
+		case RelationType::JOIN_RELATION: {
+			auto &join = cur->Cast<JoinRelation>();
+			pending.push_back(&*join.left);
+			pending.push_back(&*join.right);
+			break;
+		}
+		case RelationType::AGGREGATE_RELATION:
+			pending.push_back(&*cur->Cast<AggregateRelation>().child);
+			break;
+		case RelationType::SET_OPERATION_RELATION: {
+			auto &setop = cur->Cast<SetOpRelation>();
+			pending.push_back(&*setop.left);
+			pending.push_back(&*setop.right);
+			break;
+		}
+		case RelationType::CREATE_VIEW_RELATION:
+			pending.push_back(&*cur->Cast<CreateViewRelation>().child);
+			break;
+		case RelationType::CREATE_TABLE_RELATION:
+			pending.push_back(&*cur->Cast<CreateTableRelation>().child);
+			break;
+		case RelationType::INSERT_RELATION:
+			pending.push_back(&*cur->Cast<InsertRelation>().child);
+			break;
+		case RelationType::TABLE_FUNCTION_RELATION: {
+			auto &table_function = cur->Cast<TableFunctionRelation>();
+			if (table_function.input_relation) {
+				pending.push_back(&*table_function.input_relation);
+			}
+			break;
+		}
+		case RelationType::WRITE_CSV_RELATION:
+			pending.push_back(&*cur->Cast<WriteCSVRelation>().child);
+			break;
+		case RelationType::WRITE_PARQUET_RELATION:
+			pending.push_back(&*cur->Cast<WriteParquetRelation>().child);
+			break;
+		default:
+			pending.push_back(cur->ChildRelation());
+			break;
+		}
 	}
 	return all_dependencies;
 }

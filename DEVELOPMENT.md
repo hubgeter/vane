@@ -11,7 +11,11 @@ Vane contains Python, pybind11, and a modified DuckDB C++ engine. A native build
 - vcpkg at the baseline pinned in `vcpkg.json`
 
 The DuckDB engine fork is included directly under `external/duckdb`; a normal
-clone contains all source needed for the build.
+clone contains all DuckDB source needed for the build. The independently
+maintained Lance extension is fetched from the exact Git revision declared in
+`cmake/lance_extension_config.cmake` during the first CMake configure. Set
+`DUCKDB_LANCE_DIRECTORY` to an existing checkout of that revision for offline
+development or when testing coordinated Vane and lance-duckdb changes.
 
 Bootstrap native dependencies from the repository root:
 

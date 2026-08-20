@@ -9,6 +9,19 @@ import pytest
 
 import vane
 
+LANCE_DISTRIBUTED_EXTENSION_CONTRACT = (
+    "lance{"
+    "table_function:__lance_exec@1,"
+    "table_function:__lance_namespace_scan@1,"
+    "table_function:__lance_scan@1,"
+    "table_function:__lance_table_scan@1,"
+    "table_function:lance_fts@1,"
+    "table_function:lance_hybrid_search@1,"
+    "table_function:lance_vector_search@1,"
+    "write_operator:lance_write@2"
+    "}"
+)
+
 
 def _require_ray_cxx():
     ray_cxx = getattr(vane, "ray_cxx", None)
@@ -893,6 +906,7 @@ def test_connection_snapshot_captures_exact_extension_contract():
     assert isinstance(snapshot["extensions"], list)
     assert all(set(extension) >= {"name", "version"} for extension in snapshot["extensions"])
     assert snapshot["distributed_extension_contracts"] == [
+        LANCE_DISTRIBUTED_EXTENSION_CONTRACT,
         "vane_core{table_function:datasource_scan@1}",
     ]
 

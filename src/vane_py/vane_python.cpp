@@ -610,14 +610,16 @@ static void InitializeConnectionMethods(py::module_ &m) {
 	    "Create a relation object from the passed values", py::kw_only(), py::arg("connection") = py::none());
 	m.def(
 	    "table_function",
-	    [](const string &fname, py::object params = py::list(), shared_ptr<DuckDBPyConnection> conn = nullptr) {
+	    [](const string &fname, py::object params = py::list(), py::object named_parameters = py::dict(),
+	       shared_ptr<DuckDBPyConnection> conn = nullptr) {
 		    if (!conn) {
 			    conn = DuckDBPyConnection::DefaultConnection();
 		    }
-		    return conn->TableFunction(fname, params);
+		    return conn->TableFunction(fname, params, named_parameters);
 	    },
 	    "Create a relation object from the named table function with given parameters", py::arg("name"),
-	    py::arg("parameters") = py::none(), py::kw_only(), py::arg("connection") = py::none());
+	    py::arg("parameters") = py::none(), py::kw_only(), py::arg("named_parameters") = py::none(),
+	    py::arg("connection") = py::none());
 	m.def(
 	    "read_json",
 	    [](const py::object &name, const Optional<py::object> &columns = py::none(),

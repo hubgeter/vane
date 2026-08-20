@@ -981,12 +981,20 @@ public:
 					auto affected_rows = extension_write_provider->FinalizeDistributedWrite(
 					    *client_context_, extension_write_operation, selected_task_results);
 					if (affected_rows != copy_result.rows_copied) {
-						throw InvalidInputException("Distributed extension write %s finalized %llu rows from worker "
-						                            "metadata totaling %llu rows",
-						                            extension_write_info->Name(),
-						                            static_cast<unsigned long long>(affected_rows),
-						                            static_cast<unsigned long long>(copy_result.rows_copied));
+						throw DistributedWriteOutcomeUnknownException(
+						    "Distributed extension write %s returned after finalizing %llu rows from worker metadata "
+						    "totaling %llu rows; the provider commit must not be retried",
+						    extension_write_info->Name(), static_cast<unsigned long long>(affected_rows),
+						    static_cast<unsigned long long>(copy_result.rows_copied));
 					}
+				} catch (const DistributedWriteOutcomeUnknownException &ex) {
+					result.selected_task_results = std::move(selected_task_results);
+					result.file_result = std::move(copy_result);
+					result.outcome_unknown = true;
+					result.outcome_error = ex.what();
+					result.file_result.output_outcome_unknown = true;
+					result.file_result.output_outcome_error = result.outcome_error;
+					return DuckDBResult<PlanResult>::ok(PlanResult::make_extension_write(std::move(result)));
 				} catch (const std::exception &ex) {
 					return fail_after_write_cleanup(DuckDBError(ex.what()));
 				} catch (...) {
@@ -1015,13 +1023,21 @@ public:
 					result.rows_written += task_rows;
 					result.bytes_written += task_bytes;
 				}
-				auto affected_rows = extension_write_provider->FinalizeDistributedWrite(
-				    *client_context_, extension_write_operation, selected_task_results);
-				if (affected_rows != result.rows_written) {
-					throw InvalidInputException(
-					    "Distributed extension write %s finalized %llu rows from worker fragments totaling %llu rows",
-					    extension_write_info->Name(), static_cast<unsigned long long>(affected_rows),
-					    static_cast<unsigned long long>(result.rows_written));
+				try {
+					auto affected_rows = extension_write_provider->FinalizeDistributedWrite(
+					    *client_context_, extension_write_operation, selected_task_results);
+					if (affected_rows != result.rows_written) {
+						throw DistributedWriteOutcomeUnknownException(
+						    "Distributed extension write %s returned after finalizing %llu rows from worker fragments "
+						    "totaling %llu rows; the provider commit must not be retried",
+						    extension_write_info->Name(), static_cast<unsigned long long>(affected_rows),
+						    static_cast<unsigned long long>(result.rows_written));
+					}
+				} catch (const DistributedWriteOutcomeUnknownException &ex) {
+					result.selected_task_results = std::move(selected_task_results);
+					result.outcome_unknown = true;
+					result.outcome_error = ex.what();
+					return DuckDBResult<PlanResult>::ok(PlanResult::make_extension_write(std::move(result)));
 				}
 				result.selected_task_results = std::move(selected_task_results);
 				return DuckDBResult<PlanResult>::ok(PlanResult::make_extension_write(std::move(result)));

@@ -117,6 +117,55 @@ import vane
 vane.configure(runner="local")
 ```
 
+### Lance datasets
+
+Vane statically links a pinned revision of [`lance-duckdb`](https://github.com/hubgeter/lance-duckdb); applications do
+not need to `INSTALL` or `LOAD` an extension. Lance datasets can be read and written through either SQL or the Python
+Relation API:
+
+See [the complete Vane + Lance guide](LANCE.md) for executable local, Ray, S3/MinIO, secrets, directory namespace,
+and REST namespace examples, together with an explicit validation matrix. The
+[integration and concurrency architecture](VANE_LANCE_ARCHITECTURE.md) describes the implementation changes and its
+thread, process, and multi-node execution boundaries.
+
+```python
+import vane
+from vane.lance import LanceDataset
+
+con = vane.connect()
+source = con.read_parquet("s3://example-bucket/input/*.parquet")
+source.write_lance("s3://example-bucket/datasets/items.lance", mode="create")
+
+dataset = LanceDataset("s3://example-bucket/datasets/items.lance", con)
+rows = dataset.scan().filter("score >= 0.9")
+nearest = dataset.vector_search("embedding", [0.1, 0.2, 0.3, 0.4], k=10)
+```
+
+```sql
+COPY (SELECT 1::BIGINT AS id, 'one'::VARCHAR AS label)
+TO '/mnt/shared/items.lance' (FORMAT LANCE, MODE 'create');
+
+COPY (SELECT 2::BIGINT AS id, 'two'::VARCHAR AS label)
+TO '/mnt/shared/items.lance' (FORMAT LANCE, MODE 'append');
+
+SELECT * FROM '/mnt/shared/items.lance';
+```
+
+With the Ray runner, ordinary scans are split by immutable Lance fragments. Vector, full-text, and hybrid searches run
+as one global task so ranking remains correct. Distributed `create`, `append`, and `overwrite` writes produce
+uncommitted staging transactions on workers; the driver-side commit owner validates all selected task results and
+publishes one Lance transaction. Operation identities make a retried final commit idempotent. Known pre-commit failures
+remove their staging and uncommitted destination files; outcome-unknown writes retain evidence for reconciliation. Empty
+inputs still create a zero-row dataset with the input schema.
+
+Distributed append currently requires an exact Lance schema match, including field identities and metadata. Plain
+local paths are normalized to absolute paths when the query is bound, but that path must name the same shared
+filesystem on every Ray node. For multi-node deployments, prefer S3 or an S3-compatible store and provide credentials
+through a scoped `TYPE LANCE` secret instead of URI query parameters or user information. Directory and REST namespace
+catalog operations, DDL, index maintenance, optimization, and vacuum run on the driver. Vane coordinates
+public-helper mutations within one local process or Ray control plane; independent processes, clusters, and external
+writers remain subject to Lance's own commit-conflict rules.
+
 ### Distributed Flight Transport
 
 Vane follows [Ray's trusted-cluster model](https://docs.ray.io/en/latest/ray-security/index.html): the driver, workers, submitted code, and east-west network belong to one trusted computing boundary. Same-process local-disk shuffle reads directly from the process-local registry, and object-storage shuffle reads committed manifests. Only cross-worker local-disk shuffle uses Arrow Flight.

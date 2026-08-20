@@ -4,6 +4,7 @@
 #pragma once
 
 #include "duckdb/common/common.hpp"
+#include "duckdb/common/exception.hpp"
 #include "duckdb/execution/distributed/common_types.hpp"
 #include "duckdb/execution/distributed/copy_to_file.hpp"
 #include "duckdb/function/distributed_write.hpp"
@@ -13,6 +14,21 @@ namespace duckdb {
 class ClientContext;
 
 namespace distributed {
+
+//! A provider reached a point where its external catalog may already contain
+//! the selected fragments, but it could not prove the final commit outcome.
+//! PlanRunner must retain every artifact and surface a non-retryable
+//! outcome-unknown result instead of invoking AbortDistributedWrite.
+class DistributedWriteOutcomeUnknownException : public IOException {
+public:
+	explicit DistributedWriteOutcomeUnknownException(const string &message) : IOException(message) {
+	}
+
+	template <typename... ARGS>
+	explicit DistributedWriteOutcomeUnknownException(const string &message, ARGS &&...params)
+	    : IOException(message, std::forward<ARGS>(params)...) {
+	}
+};
 
 //! Stable coordinator identity for one distributed write operation. It remains
 //! available even when no worker result envelope was produced, so a provider

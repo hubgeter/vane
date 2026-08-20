@@ -410,6 +410,8 @@ def _check_sdist(artifact: SdistArtifact) -> None:
             raise ValueError(f"{artifact.path}: Vane sdist contains conflicting Python package path {name!r}")
         if not parts or parts[0] != EXPECTED_ARCHIVE_ROOT:
             raise ValueError(f"{artifact.path}: Vane sdist contains an unexpected archive root: {name!r}")
+        if len(parts) >= 3 and parts[1:3] == ("external", "lance-duckdb"):
+            raise ValueError(f"{artifact.path}: Vane sdist must not vendor lance-duckdb source: {name!r}")
 
     required_paths = (
         "DUCKDB_FORK_REVISION",
@@ -420,7 +422,9 @@ def _check_sdist(artifact: SdistArtifact) -> None:
         "THIRD_PARTY.md",
         "SOURCE_PROVENANCE.md",
         "LICENSES/DuckDB-MIT.txt",
+        "LICENSES/lance-rust-dependencies.txt",
         "LICENSES/vcpkg-binary-dependencies.txt",
+        "cmake/lance_extension_config.cmake",
         "external/duckdb/LICENSE",
         "build_backend.py",
         "scripts/resolve_duckdb_fork_version.py",
@@ -430,6 +434,8 @@ def _check_sdist(artifact: SdistArtifact) -> None:
         "scripts/verify_duckdb_coexistence.py",
         "tests/ray_test_profile.py",
         "tests/fast/test_package_metadata.py",
+        "tests/fast/test_lance.py",
+        "tests/fast/test_lance_coordinator.py",
         "tests/fast/test_ray_test_profile.py",
         "vane/_native/__init__.pyi",
         "vane/_native/_func.pyi",

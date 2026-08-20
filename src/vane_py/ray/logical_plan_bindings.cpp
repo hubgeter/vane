@@ -898,6 +898,7 @@ static py::list CaptureSecretSnapshot(DuckDBPyConnection &conn_wrapper) {
 	struct SerializedSecret {
 		string storage;
 		string name;
+		string type;
 		string payload;
 	};
 	vector<SerializedSecret> serialized_secrets;
@@ -918,8 +919,8 @@ static py::list CaptureSecretSnapshot(DuckDBPyConnection &conn_wrapper) {
 			if (entry.storage_mode.empty() || entry.secret->GetName().empty()) {
 				throw InternalException("Distributed connection snapshot encountered a secret without storage or name");
 			}
-			serialized_secrets.push_back(
-			    {entry.storage_mode, entry.secret->GetName(), SerializeSecretForSnapshot(context, *entry.secret)});
+			serialized_secrets.push_back({entry.storage_mode, entry.secret->GetName(), entry.secret->GetType(),
+			                              SerializeSecretForSnapshot(context, *entry.secret)});
 		}
 	});
 	std::sort(serialized_secrets.begin(), serialized_secrets.end(),
@@ -932,6 +933,7 @@ static py::list CaptureSecretSnapshot(DuckDBPyConnection &conn_wrapper) {
 		py::dict secret_obj;
 		secret_obj[py::str("storage")] = py::str(entry.storage);
 		secret_obj[py::str("name")] = py::str(entry.name);
+		secret_obj[py::str("type")] = py::str(entry.type);
 		secret_obj[py::str("payload")] = py::bytes(entry.payload);
 		secrets_obj.append(std::move(secret_obj));
 	}

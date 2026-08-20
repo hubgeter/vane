@@ -59,18 +59,24 @@ configuration has remained unchanged.
    request. Update `DUCKDB_UPSTREAM_VERSION` and `SOURCE_PROVENANCE.md` only
    when the imported upstream baseline, DuckDB version line, or historical
    mapping changes.
-4. Confirm that imported dependencies have compatible terms and that
+4. Confirm that `cmake/lance_extension_config.cmake` pins the reviewed
+   lance-duckdb commit and that the remote commit is still retrievable. Release
+   builds must use that immutable source instead of a local
+   `DUCKDB_LANCE_DIRECTORY` override.
+5. Confirm that imported dependencies have compatible terms and that
    `SOURCE_PROVENANCE.md`, `THIRD_PARTY.md`, `LICENSE`, and `NOTICE` are current.
-5. Install the pinned vcpkg manifest and run
-   `python scripts/sync_vcpkg_licenses.py --check`.
-6. Run formatting, fast and release tests, relevant slow and native tests, and
+6. Install the pinned vcpkg manifest, run
+   `python scripts/sync_vcpkg_licenses.py --check`, and verify the Lance Rust
+   bundle against the fetched source with
+   `python scripts/sync_lance_cargo_licenses.py --check`.
+7. Run formatting, fast and release tests, relevant slow and native tests, and
    the build-only release workflow. Manually inspect the sdist and wheel file
    lists. TPC-H, TPC-DS, TPC-E tools, local paths, credentials, caches, logs,
    model weights, and build directories must not be present.
-7. Triage security findings. A release must not carry an unexplained
+8. Triage security findings. A release must not carry an unexplained
    first-party critical or high-severity alert. Record the disposition of
    inherited and third-party findings that affect shipped code.
-8. Confirm that the version is absent from both TestPyPI and PyPI, review known
+9. Confirm that the version is absent from both TestPyPI and PyPI, review known
    issues and the supported-platform statement, merge the pull request, and
    record its exact commit SHA.
 

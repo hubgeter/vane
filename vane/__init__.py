@@ -29,6 +29,7 @@ from vane._expressions import col, lit, sql_expr
 
 if _typing.TYPE_CHECKING:
     from vane import ai as ai
+    from vane import lance as lance
     from vane import runners as runners
     from vane import sqltypes as sqltypes
     from vane import udf as udf
@@ -257,6 +258,16 @@ def set_runner_ray(
     return _set_runner_ray(address, noop_if_initialized, max_task_backlog)
 
 
+def read_lance(
+    uri: str,
+    *,
+    connection: DuckDBPyConnection | None = None,
+) -> DuckDBPyRelation:
+    """Create a relation pinned to the Lance version observed at bind time."""
+    conn = default_connection() if connection is None else connection
+    return conn.read_lance(uri)
+
+
 # Short public aliases for the native classes.
 Connection = DuckDBPyConnection
 Relation = DuckDBPyRelation
@@ -273,6 +284,7 @@ _VANE_SUBMODULES = frozenset(
         "experimental",
         "expressions",
         "filesystem",
+        "lance",
         "query_graph",
         "runners",
         "sqltypes",
@@ -462,6 +474,7 @@ __all__: list[str] = [
     "ray_cxx",
     "read_csv",
     "read_json",
+    "read_lance",
     "read_parquet",
     "register",
     "register_filesystem",

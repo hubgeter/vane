@@ -54,6 +54,48 @@ static void InitializeConsumers(py::class_<DuckDBPyRelation> &m) {
 	    py::arg("per_thread_output") = py::none(), py::arg("use_tmp_file") = py::none(),
 	    py::arg("partition_by") = py::none(), py::arg("write_partition_columns") = py::none());
 
+	auto write_lance = [](DuckDBPyRelation &relation, const string &uri, const string &mode,
+	                      const py::object &max_rows_per_file, const py::object &max_rows_per_group,
+	                      const py::object &max_bytes_per_file, const py::object &data_storage_version) {
+		auto lease = py::module_::import("vane.lance._coordinator").attr("_MutationLease")(uri);
+		try {
+			relation.ToLance(uri, mode, max_rows_per_file, max_rows_per_group, max_bytes_per_file,
+			                 data_storage_version);
+		} catch (py::error_already_set &error) {
+			auto unknown_error = py::module_::import("vane.runners.copy_outcome").attr("CopyOutcomeUnknownError");
+			if (error.matches(unknown_error.ptr())) {
+				// The Ray driver may still be finalizing the commit. Releasing the
+				// mutation lease here would allow a second writer into the same
+				// dataset while that outcome remains unresolved.
+				lease.attr("retain_after_outcome_unknown")();
+				throw;
+			}
+			try {
+				lease.attr("close")();
+			} catch (...) { // preserve the primary write failure
+			}
+			throw;
+		} catch (...) {
+			try {
+				lease.attr("close")();
+			} catch (...) { // preserve the primary write failure
+			}
+			throw;
+		}
+		lease.attr("close_after_commit")(uri);
+	};
+	DefineMethod({"to_lance", "write_lance"}, m, write_lance, "Write the relation through one Lance transaction",
+	             py::arg("uri"), py::kw_only(), py::arg("mode") = "create", py::arg("max_rows_per_file") = py::none(),
+	             py::arg("max_rows_per_group") = py::none(), py::arg("max_bytes_per_file") = py::none(),
+	             py::arg("data_storage_version") = py::none());
+	m.def("_attach_lance_snapshot_lease", &DuckDBPyRelation::AttachLanceSnapshotLease, py::arg("lease"));
+	m.def(
+	    "_shares_connection",
+	    [](DuckDBPyRelation &relation, DuckDBPyConnection &connection) {
+		    return relation.CanBeRegisteredBy(connection.con.GetConnection());
+	    },
+	    py::arg("connection"));
+
 	m.def("fetchone", &DuckDBPyRelation::FetchOne, "Execute and fetch a single row as a tuple")
 	    .def("fetchmany", &DuckDBPyRelation::FetchMany, "Execute and fetch the next set of rows as a list of tuples",
 	         py::arg("size") = 1)

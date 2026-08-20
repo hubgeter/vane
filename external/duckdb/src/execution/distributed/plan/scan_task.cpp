@@ -710,8 +710,16 @@ static bool ApplyFteExtensionScanTasks(PhysicalTableScan &scan, const std::share
 	if (has_descriptor) {
 		return ApplyExtensionScanTasks(scan, merged, error);
 	}
-	SetApplyError(error, "FTE extension scan source queue finished without an explicit task descriptor");
-	return false;
+	// An extension-owned scan can be assigned no work on this worker.  The
+	// callback contract requires an empty vector to install an explicit empty
+	// scan, which is distinct from executing the detached coordinator bind.
+	const auto &callbacks = scan.function.GetDistributedScanCallbacks();
+	callbacks.Validate(scan.function.name);
+	callbacks.apply_tasks(*scan.bind_data, {});
+	scan.extra_info.total_files = optional_idx(0);
+	scan.extra_info.filtered_files = optional_idx(0);
+	scan.distributed_scan_tasks_applied = true;
+	return true;
 }
 
 bool ApplyFteScanSourceQueuesToOperator(PhysicalOperator &op,

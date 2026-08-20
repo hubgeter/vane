@@ -4,6 +4,7 @@
 import importlib
 import os
 import platform
+import re
 import subprocess
 import sys
 import types
@@ -18,6 +19,16 @@ from packaging.utils import canonicalize_name
 import vane
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _configured_lance_revision(repository_root: Path) -> str:
+    config = (repository_root / "cmake" / "lance_extension_config.cmake").read_text(encoding="utf-8")
+    match = re.search(r'set\(_VANE_LANCE_GIT_TAG "([0-9a-f]{40})"\)', config)
+    assert match is not None
+    return match.group(1)
+
+
+LANCE_EXTENSION_REVISION = _configured_lance_revision(REPOSITORY_ROOT)
 
 
 def test_vane_public_exports_are_unique_and_resolvable():
@@ -71,7 +82,7 @@ def test_vane_adbc_public_exports_are_explicit():
 
 
 def test_vane_lazily_exposes_owned_public_submodules():
-    for name in ("ai", "runners", "sqltypes", "udf"):
+    for name in ("ai", "lance", "runners", "sqltypes", "udf"):
         assert getattr(vane, name) is importlib.import_module(f"vane.{name}")
         assert name in dir(vane)
 
@@ -381,7 +392,7 @@ def test_release_runtime_is_self_contained_by_default():
         ).fetchall()
     }
 
-    expected_extensions = {"core_functions", "httpfs", "icu", "json", "parquet"}
+    expected_extensions = {"core_functions", "httpfs", "icu", "json", "lance", "parquet"}
     if platform.system() == "Linux" and sys.maxsize > 2**32:
         expected_extensions.add("jemalloc")
 
@@ -394,10 +405,36 @@ def test_release_runtime_is_self_contained_by_default():
     assert all(installed and loaded for installed, loaded, _ in static_extensions.values())
 
     source_id = _expected_duckdb_source_id(REPOSITORY_ROOT)[:10]
-    in_tree_extensions = expected_extensions - {"httpfs"}
+    in_tree_extensions = expected_extensions - {"httpfs", "lance"}
     assert {name: static_extensions[name][2] for name in in_tree_extensions} == {
         name: source_id for name in in_tree_extensions
     }
+    assert static_extensions["lance"][2] == LANCE_EXTENSION_REVISION
+
+
+def test_lance_revision_references_match_the_build_pin():
+    revision = _configured_lance_revision(REPOSITORY_ROOT)
+    assert f'LANCE_REVISION = "{revision}"' in (REPOSITORY_ROOT / "examples" / "lance_complete.py").read_text(
+        encoding="utf-8"
+    )
+
+    for relative_path in ("LANCE.md", "SOURCE_PROVENANCE.md", "VANE_LANCE_ARCHITECTURE.md"):
+        assert revision in (REPOSITORY_ROOT / relative_path).read_text(encoding="utf-8")
+
+    architecture = (REPOSITORY_ROOT / "VANE_LANCE_ARCHITECTURE.md").read_text(encoding="utf-8")
+    linked_revisions = set(re.findall(r"github\.com/hubgeter/lance-duckdb/(?:tree|blob)/([0-9a-f]{40})", architecture))
+    assert linked_revisions == {revision}
+
+
+def test_lance_dependency_is_not_accidentally_vendored():
+    if not (REPOSITORY_ROOT / ".git").exists():
+        pytest.skip("git metadata is unavailable in an exported source tree")
+    tracked = subprocess.check_output(
+        ["git", "ls-files", "--", "external/lance-duckdb"],
+        cwd=REPOSITORY_ROOT,
+        text=True,
+    )
+    assert tracked == ""
 
 
 @pytest.mark.parametrize(
@@ -460,6 +497,39 @@ def test_sdist_tree_uses_injected_source_id(tmp_path, monkeypatch):
     )
 
     assert _expected_duckdb_source_id(tmp_path) == expected
+
+
+def test_manylinux_wheels_bootstrap_the_pinned_lance_rust_toolchain():
+    pyproject = (REPOSITORY_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    rust_script_path = REPOSITORY_ROOT / "scripts" / "bootstrap_manylinux_rust.sh"
+    rust_script = rust_script_path.read_text(encoding="utf-8")
+    bootstrap_command = '"bash {package}/scripts/bootstrap_manylinux_rust.sh"'
+
+    assert bootstrap_command in pyproject
+    assert '"/scripts/bootstrap_manylinux_rust.sh"' in pyproject
+    assert pyproject.index(bootstrap_command) < pyproject.index('"bash {package}/scripts/bootstrap_vcpkg.sh {package}"')
+    assert rust_script_path.stat().st_mode & 0o111
+    assert 'rust_version="1.94.1"' in rust_script
+    assert 'rustup_version="1.28.2"' in rust_script
+    assert 'rustup_sha256="20a06e644b0d9bd2fbdbfd52d42540bdde820ea7df86e92e533c073da0cdd43c"' in rust_script
+
+
+@pytest.mark.parametrize(
+    ("expression", "permitted"),
+    [
+        ("Apache-2.0", True),
+        ("MIT/Apache-2.0", True),
+        ("MIT OR Apache-2.0 OR LGPL-2.1-or-later", True),
+        ("(MIT OR Apache-2.0) AND BSD-3-Clause", True),
+        ("MIT AND GPL-3.0-or-later", False),
+        ("GPL-2.0-only WITH Classpath-exception-2.0", False),
+        ("AGPL-3.0-only", False),
+    ],
+)
+def test_lance_license_policy_understands_spdx_choices(expression, permitted):
+    from scripts.sync_lance_cargo_licenses import license_expression_has_permitted_choice
+
+    assert license_expression_has_permitted_choice(expression) is permitted
 
 
 def test_image_extra_installs_pillow():
