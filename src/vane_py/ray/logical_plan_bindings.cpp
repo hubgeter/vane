@@ -786,61 +786,126 @@ static void ApplyEffectiveVaneSessionConfig(DuckDBPyConnection &conn_wrapper, co
 	ApplyVaneSessionConfigValues(conn_wrapper.con.GetConnection(), config_obj.cast<py::dict>());
 }
 
-static std::vector<string> QueryLoadedNonStaticExtensionNames(DuckDBPyConnection &conn_wrapper) {
-	std::vector<string> extensions;
-	auto result =
-	    ExecuteSnapshotQuery(conn_wrapper.con.GetConnection(), "SELECT extension_name "
-	                                                           "FROM duckdb_extensions() "
-	                                                           "WHERE loaded AND install_mode <> 'STATICALLY_LINKED' "
-	                                                           "ORDER BY extension_name");
-	auto &collection = result->Collection();
-	extensions.reserve(collection.Count());
-	for (auto &row : collection.Rows()) {
-		auto value = row.GetValue(0);
-		if (value.IsNull()) {
-			continue;
-		}
-		auto extension_name = value.ToString();
-		if (!extension_name.empty()) {
-			extensions.push_back(std::move(extension_name));
-		}
-	}
-	return extensions;
-}
-
-struct StaticExtensionSnapshotEntry {
+struct ExtensionSnapshotEntry {
 	string name;
 	string version;
+	string mode;
+	string path;
+	string sha256;
 
-	bool operator==(const StaticExtensionSnapshotEntry &other) const {
-		return name == other.name && version == other.version;
+	bool operator==(const ExtensionSnapshotEntry &other) const {
+		return name == other.name && version == other.version && mode == other.mode && path == other.path &&
+		       sha256 == other.sha256;
 	}
 
-	bool operator<(const StaticExtensionSnapshotEntry &other) const {
+	bool operator<(const ExtensionSnapshotEntry &other) const {
 		return name < other.name;
 	}
 };
 
-static vector<StaticExtensionSnapshotEntry> QueryLoadedStaticExtensions(DuckDBPyConnection &conn_wrapper) {
-	vector<StaticExtensionSnapshotEntry> extensions;
-	auto result =
-	    ExecuteSnapshotQuery(conn_wrapper.con.GetConnection(), "SELECT extension_name, extension_version "
-	                                                           "FROM duckdb_extensions() "
-	                                                           "WHERE loaded AND install_mode = 'STATICALLY_LINKED' "
-	                                                           "ORDER BY extension_name");
-	auto &collection = result->Collection();
-	extensions.reserve(collection.Count());
-	for (auto &row : collection.Rows()) {
-		auto name_value = row.GetValue(0);
-		if (name_value.IsNull()) {
+static constexpr const char *STATIC_EXTENSION_MODE = "STATICALLY_LINKED";
+static constexpr const char *LOADABLE_EXTENSION_MODE = "LOADABLE";
+
+static bool IsSafeExtensionName(const string &name) {
+	if (name.empty()) {
+		return false;
+	}
+	for (auto character : name) {
+		if ((character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z') ||
+		    (character >= '0' && character <= '9') || character == '_') {
 			continue;
 		}
-		auto extension_name = name_value.ToString();
-		if (!extension_name.empty()) {
-			auto version_value = row.GetValue(1);
-			extensions.push_back(
-			    {std::move(extension_name), version_value.IsNull() ? string() : version_value.ToString()});
+		return false;
+	}
+	return true;
+}
+
+static bool IsLowerHexSHA256(const string &digest) {
+	if (digest.size() != duckdb_mbedtls::MbedTlsWrapper::SHA256_HASH_LENGTH_TEXT) {
+		return false;
+	}
+	for (auto character : digest) {
+		if ((character >= '0' && character <= '9') || (character >= 'a' && character <= 'f')) {
+			continue;
 		}
+		return false;
+	}
+	return true;
+}
+
+static string CanonicalLoadableExtensionPath(DatabaseInstance &database, const string &path) {
+	if (path.empty()) {
+		throw InvalidInputException("A loaded extension has no local artifact path");
+	}
+	auto &local_fs = FileSystem::GetLocal(database).Cast<LocalFileSystem>();
+	auto absolute_path = local_fs.MakePathAbsolute(path, nullptr);
+	auto canonical_path = local_fs.CanonicalizePath(absolute_path, nullptr);
+	if (!local_fs.IsPathAbsolute(canonical_path) || !local_fs.FileExists(canonical_path)) {
+		throw InvalidInputException("Loadable extension artifact does not exist at local path: %s", canonical_path);
+	}
+	return canonical_path;
+}
+
+static string SHA256LocalFile(DatabaseInstance &database, const string &path) {
+	auto &local_fs = FileSystem::GetLocal(database).Cast<LocalFileSystem>();
+	auto handle = local_fs.OpenFile(path, FileFlags::FILE_FLAGS_READ);
+	duckdb_mbedtls::MbedTlsWrapper::SHA256State state;
+	vector<data_t> buffer(1024 * 1024);
+	while (true) {
+		auto bytes_read = handle->Read(buffer.data(), buffer.size());
+		if (bytes_read < 0) {
+			throw IOException("Failed to read loadable extension artifact: %s", path);
+		}
+		if (bytes_read == 0) {
+			break;
+		}
+		state.AddBytes(buffer.data(), NumericCast<idx_t>(bytes_read));
+	}
+	string digest(duckdb_mbedtls::MbedTlsWrapper::SHA256_HASH_LENGTH_TEXT, '\0');
+	state.FinishHex(digest.data());
+	return digest;
+}
+
+static vector<ExtensionSnapshotEntry> QueryLoadedExtensions(DatabaseInstance &database,
+                                                            bool hash_loadable_artifacts = true) {
+	vector<ExtensionSnapshotEntry> extensions;
+	auto &manager = ExtensionManager::Get(database);
+	auto extension_names = manager.GetExtensions();
+	std::sort(extension_names.begin(), extension_names.end());
+	extensions.reserve(extension_names.size());
+	for (auto &extension_name : extension_names) {
+		auto info = manager.GetExtensionInfo(extension_name);
+		if (!info) {
+			continue;
+		}
+		string version;
+		string install_path;
+		ExtensionInstallMode install_mode;
+		{
+			lock_guard<mutex> guard(info->lock);
+			if (!info->is_loaded) {
+				continue;
+			}
+			if (!info->install_info) {
+				throw InvalidInputException("Loaded extension '%s' has no installation identity", extension_name);
+			}
+			version = info->install_info->version;
+			install_path = info->install_info->full_path;
+			install_mode = info->install_info->mode;
+		}
+		ExtensionSnapshotEntry extension;
+		extension.name = std::move(extension_name);
+		extension.version = std::move(version);
+		if (install_mode == ExtensionInstallMode::STATICALLY_LINKED) {
+			extension.mode = STATIC_EXTENSION_MODE;
+		} else {
+			extension.mode = LOADABLE_EXTENSION_MODE;
+			extension.path = CanonicalLoadableExtensionPath(database, install_path);
+			if (hash_loadable_artifacts) {
+				extension.sha256 = SHA256LocalFile(database, extension.path);
+			}
+		}
+		extensions.push_back(std::move(extension));
 	}
 	return extensions;
 }
@@ -870,90 +935,169 @@ static std::vector<ConnectionSettingRecord> QueryConnectionSettings(DuckDBPyConn
 	return settings;
 }
 
-static void RejectNonStaticRayExtensions(const std::vector<string> &extension_names) {
-	if (extension_names.empty()) {
-		return;
-	}
-	auto joined_names = extension_names.front();
-	for (idx_t index = 1; index < extension_names.size(); index++) {
-		joined_names += ", " + extension_names[index];
-	}
-	throw duckdb::InvalidInputException("Ray distributed execution supports only statically linked extensions; "
-	                                    "non-static extensions are not supported: "
-	                                    "%s",
-	                                    joined_names);
-}
-
-static bool IsSafeStaticExtensionName(const string &name) {
-	if (name.empty()) {
-		return false;
-	}
-	for (auto character : name) {
-		if ((character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z') ||
-		    (character >= '0' && character <= '9') || character == '_') {
-			continue;
-		}
-		return false;
-	}
-	return true;
-}
-
-static string StaticExtensionListIdentity(const vector<StaticExtensionSnapshotEntry> &extensions) {
+static string ExtensionListIdentity(const vector<ExtensionSnapshotEntry> &extensions) {
 	vector<string> identities;
 	identities.reserve(extensions.size());
 	for (const auto &extension : extensions) {
-		identities.push_back(extension.name + "@" + extension.version);
+		auto identity = extension.name + "@" + extension.version + "[" + extension.mode;
+		if (extension.mode == LOADABLE_EXTENSION_MODE) {
+			identity += ":" + extension.path + "#" + extension.sha256;
+		}
+		identities.push_back(std::move(identity) + "]");
 	}
 	return "[" + StringUtil::Join(identities, ",") + "]";
 }
 
-static vector<StaticExtensionSnapshotEntry> LoadedStaticExtensions(DatabaseInstance &database) {
-	vector<StaticExtensionSnapshotEntry> extensions;
-	auto &manager = ExtensionManager::Get(database);
-	for (const auto &extension_name : manager.GetExtensions()) {
-		auto info = manager.GetExtensionInfo(extension_name);
-		if (!info) {
-			continue;
-		}
-		lock_guard<mutex> guard(info->lock);
-		if (!info->is_loaded || !info->install_info ||
-		    info->install_info->mode != ExtensionInstallMode::STATICALLY_LINKED) {
-			continue;
-		}
-		extensions.push_back({extension_name, info->install_info->version});
+static bool ExtensionMetadataMatches(const vector<ExtensionSnapshotEntry> &loaded_extensions,
+                                     const vector<ExtensionSnapshotEntry> &expected_extensions) {
+	if (loaded_extensions.size() != expected_extensions.size()) {
+		return false;
 	}
-	std::sort(extensions.begin(), extensions.end());
-	return extensions;
+	for (idx_t extension_idx = 0; extension_idx < loaded_extensions.size(); extension_idx++) {
+		auto &loaded = loaded_extensions[extension_idx];
+		auto &expected = expected_extensions[extension_idx];
+		if (loaded.name != expected.name || loaded.version != expected.version || loaded.mode != expected.mode ||
+		    loaded.path != expected.path) {
+			return false;
+		}
+	}
+	return true;
 }
 
-static void LoadStaticRayExtensions(duckdb::Connection &conn, const vector<StaticExtensionSnapshotEntry> &extensions) {
-	auto &database = duckdb::DatabaseInstance::GetDatabase(*conn.context);
-	duckdb::DuckDB db(database);
+class VerifiedConnectionExtensionSnapshot : public ObjectCacheEntry {
+public:
+	string GetObjectType() override {
+		return ObjectType();
+	}
+
+	static string ObjectType() {
+		return "vane_verified_connection_extension_snapshot";
+	}
+
+	optional_idx GetEstimatedCacheMemory() const override {
+		return optional_idx {};
+	}
+
+	mutex lock;
+	bool initialized = false;
+	vector<ExtensionSnapshotEntry> extensions;
+};
+
+static void LoadRayExtensions(DatabaseInstance &database, ExtensionManager &manager, DuckDB &db,
+                              const vector<ExtensionSnapshotEntry> &extensions) {
 	for (const auto &extension : extensions) {
-		if (!IsSafeStaticExtensionName(extension.name)) {
-			throw duckdb::InvalidInputException("Invalid static extension name in connection snapshot: %s",
-			                                    extension.name);
+		if (!IsSafeExtensionName(extension.name)) {
+			throw duckdb::InvalidInputException("Invalid extension name in connection snapshot: %s", extension.name);
 		}
-		auto linked_name = duckdb::StringUtil::Lower(extension.name);
-		if (!duckdb::ExtensionHelper::IsExtensionLinked(linked_name)) {
-			throw duckdb::InvalidInputException("Ray distributed execution supports only statically linked extensions; "
-			                                    "extension '%s' is not statically "
-			                                    "linked into this worker",
-			                                    extension.name);
+		if (extension.mode == STATIC_EXTENSION_MODE) {
+			if (!extension.path.empty() || !extension.sha256.empty()) {
+				throw InvalidInputException("Static extension '%s' must not declare an artifact path or SHA-256",
+				                            extension.name);
+			}
+			auto linked_name = duckdb::StringUtil::Lower(extension.name);
+			if (!duckdb::ExtensionHelper::IsExtensionLinked(linked_name)) {
+				throw duckdb::InvalidInputException("Extension '%s' is not statically linked into this worker",
+				                                    extension.name);
+			}
+			if (!manager.ExtensionIsLoaded(linked_name) && duckdb::ExtensionHelper::LoadExtension(db, linked_name) !=
+			                                                   duckdb::ExtensionLoadResult::LOADED_EXTENSION) {
+				throw duckdb::InvalidInputException("Extension '%s' could not be loaded from this worker's static set",
+				                                    extension.name);
+			}
+			continue;
 		}
-		if (duckdb::ExtensionHelper::LoadExtension(db, linked_name) != duckdb::ExtensionLoadResult::LOADED_EXTENSION) {
-			throw duckdb::InvalidInputException("Ray distributed execution supports only statically linked extensions; "
-			                                    "extension '%s' is not statically "
-			                                    "linked into this worker",
-			                                    extension.name);
+		if (extension.mode != LOADABLE_EXTENSION_MODE) {
+			throw InvalidInputException("Extension '%s' has unsupported snapshot mode '%s'", extension.name,
+			                            extension.mode);
+		}
+		if (!IsLowerHexSHA256(extension.sha256)) {
+			throw InvalidInputException("Loadable extension '%s' has an invalid SHA-256 identity", extension.name);
+		}
+		auto canonical_path = CanonicalLoadableExtensionPath(database, extension.path);
+		if (canonical_path != extension.path) {
+			throw InvalidInputException("Loadable extension '%s' path is not canonical: %s", extension.name,
+			                            extension.path);
+		}
+		auto digest_before_load = SHA256LocalFile(database, canonical_path);
+		if (digest_before_load != extension.sha256) {
+			throw InvalidInputException(
+			    "Loadable extension '%s' artifact SHA-256 differs between coordinator and worker", extension.name);
+		}
+		auto extension_name = StringUtil::Lower(extension.name);
+		auto already_loaded = manager.ExtensionIsLoaded(extension_name);
+		if (!already_loaded &&
+		    ExtensionHelper::LoadExtension(db, canonical_path) != ExtensionLoadResult::LOADED_EXTENSION) {
+			throw InvalidInputException("Loadable extension '%s' could not be loaded from pre-provisioned path %s",
+			                            extension.name, canonical_path);
+		}
+		if (!already_loaded && SHA256LocalFile(database, canonical_path) != extension.sha256) {
+			throw InvalidInputException("Loadable extension '%s' artifact changed while it was being loaded",
+			                            extension.name);
 		}
 	}
-	auto loaded_extensions = LoadedStaticExtensions(database);
-	if (loaded_extensions != extensions) {
+}
+
+static void ValidateRayExtensionSnapshot(duckdb::Connection &conn, const vector<ExtensionSnapshotEntry> &extensions,
+                                         const vector<string> &distributed_extension_contracts) {
+	auto &database = duckdb::DatabaseInstance::GetDatabase(*conn.context);
+	auto &cache = database.GetObjectCache();
+	auto verified = cache.GetOrCreateWithTypePrefix<VerifiedConnectionExtensionSnapshot>("exact");
+	if (!verified) {
+		throw InternalException("Could not allocate the connection extension snapshot verification cache");
+	}
+	lock_guard<mutex> guard(verified->lock);
+	auto loaded_extensions = QueryLoadedExtensions(database, false);
+	if (verified->initialized && verified->extensions == extensions) {
+		if (!ExtensionMetadataMatches(loaded_extensions, extensions)) {
+			throw InvalidInputException(
+			    "Extension identities changed after snapshot verification: expected %s, worker loaded %s",
+			    ExtensionListIdentity(extensions), ExtensionListIdentity(loaded_extensions));
+		}
+		DistributedExtensionManager::Get(database).ValidateExact(distributed_extension_contracts);
+		return;
+	}
+
+	vector<ExtensionSnapshotEntry> extensions_to_load;
+	if (!verified->initialized) {
+		extensions_to_load = extensions;
+	} else {
+		// Extension loading is monotonic for a DatabaseInstance. A later source
+		// snapshot may add an extension, but it must preserve the exact identity
+		// of every binary whose in-memory code was already verified.
+		idx_t verified_idx = 0;
+		for (const auto &extension : extensions) {
+			if (verified_idx < verified->extensions.size() &&
+			    verified->extensions[verified_idx].name == extension.name) {
+				if (!(verified->extensions[verified_idx] == extension)) {
+					throw InvalidInputException(
+					    "Extension identity differs from the binary already verified for this DatabaseInstance: "
+					    "expected %s, verified %s",
+					    ExtensionListIdentity(extensions), ExtensionListIdentity(verified->extensions));
+				}
+				verified_idx++;
+				continue;
+			}
+			extensions_to_load.push_back(extension);
+		}
+		if (verified_idx != verified->extensions.size()) {
+			throw InvalidInputException("Extension snapshot omits a binary already verified for this DatabaseInstance: "
+			                            "expected %s, verified %s",
+			                            ExtensionListIdentity(extensions), ExtensionListIdentity(verified->extensions));
+		}
+	}
+
+	duckdb::DuckDB db(database);
+	auto &manager = ExtensionManager::Get(database);
+	LoadRayExtensions(database, manager, db, extensions_to_load);
+	loaded_extensions = QueryLoadedExtensions(database, false);
+	if (!ExtensionMetadataMatches(loaded_extensions, extensions)) {
 		throw InvalidInputException(
-		    "Static extension identities differ between coordinator and worker: expected %s, worker loaded %s",
-		    StaticExtensionListIdentity(extensions), StaticExtensionListIdentity(loaded_extensions));
+		    "Extension identities differ between coordinator and worker: expected %s, worker loaded %s",
+		    ExtensionListIdentity(extensions), ExtensionListIdentity(loaded_extensions));
 	}
+	DistributedExtensionManager::Get(database).ValidateExact(distributed_extension_contracts);
+	verified->extensions = extensions;
+	verified->initialized = true;
 }
 
 static py::list CaptureDistributedExtensionContracts(DatabaseInstance &database) {
@@ -998,7 +1142,15 @@ static py::list CaptureAttachedDatabaseSnapshot(DuckDBPyConnection &conn_wrapper
 
 		auto &catalog = database->GetCatalog();
 		auto options = database->GetAttachOptions();
-		options["type"] = Value(catalog.GetCatalogType());
+		// Catalog::GetCatalogType() describes the catalog implementation and may
+		// be "duckdb" for an extension-backed catalog.  Replay the original
+		// storage type when one was requested, falling back to the catalog type
+		// for ordinary DuckDB attachments.
+		if (!database->GetDatabaseType().empty()) {
+			options["type"] = Value(database->GetDatabaseType());
+		} else {
+			options["type"] = Value(catalog.GetCatalogType());
+		}
 		if (database->IsReadOnly()) {
 			options["read_only"] = Value::BOOLEAN(true);
 		}
@@ -1019,7 +1171,11 @@ static py::list CaptureAttachedDatabaseSnapshot(DuckDBPyConnection &conn_wrapper
 			serialized_options.push_back(option_name + " " + options.at(option_name).ToSQLString());
 		}
 
-		string attach_sql = "ATTACH DATABASE " + KeywordHelper::WriteQuoted(catalog.GetDBPath(), '\'') + " AS " +
+		auto attach_path = database->GetAttachPath();
+		if (attach_path.empty()) {
+			attach_path = catalog.GetDBPath();
+		}
+		string attach_sql = "ATTACH DATABASE " + KeywordHelper::WriteQuoted(attach_path, '\'') + " AS " +
 		                    KeywordHelper::WriteOptionallyQuoted(database->GetName());
 		if (!serialized_options.empty()) {
 			attach_sql += " (" + StringUtil::Join(serialized_options, ", ") + ")";
@@ -1058,9 +1214,8 @@ static bool VaneRaySessionLifecycleEnabled() {
 
 static py::object CaptureConnectionSnapshot(DuckDBPyConnection &conn_wrapper) {
 	auto bootstrap_obj = conn_wrapper.ExportConnectionBootstrapConfig();
-	auto non_static_extensions = QueryLoadedNonStaticExtensionNames(conn_wrapper);
-	RejectNonStaticRayExtensions(non_static_extensions);
-	auto static_extensions = QueryLoadedStaticExtensions(conn_wrapper);
+	auto &database = DatabaseInstance::GetDatabase(*conn_wrapper.con.GetConnection().context);
+	auto extensions = QueryLoadedExtensions(database);
 	auto source_settings = QueryConnectionSettings(conn_wrapper);
 
 	auto default_conn_obj = CreateSnapshotBaselineConnection(conn_wrapper, bootstrap_obj);
@@ -1103,10 +1258,13 @@ static py::object CaptureConnectionSnapshot(DuckDBPyConnection &conn_wrapper) {
 	}
 	snapshot_obj[py::str("duckdb_source_id")] = py::str(DuckDB::SourceID());
 	py::list extensions_obj;
-	for (const auto &extension : static_extensions) {
+	for (const auto &extension : extensions) {
 		py::dict extension_obj;
 		extension_obj[py::str("name")] = py::str(extension.name);
 		extension_obj[py::str("version")] = py::str(extension.version);
+		extension_obj[py::str("mode")] = py::str(extension.mode);
+		extension_obj[py::str("path")] = py::str(extension.path);
+		extension_obj[py::str("sha256")] = py::str(extension.sha256);
 		extensions_obj.append(std::move(extension_obj));
 	}
 	snapshot_obj[py::str("extensions")] = std::move(extensions_obj);
@@ -1178,7 +1336,7 @@ struct ConnectionSnapshotApplyOptions {
 static void ApplyConnectionSnapshot(py::object conn_obj, const py::object &snapshot_obj,
                                     const ConnectionSnapshotApplyOptions &options);
 
-static bool ConnectionSnapshotDeclaresStaticExtension(const py::object &snapshot_obj, const string &extension_name) {
+static bool ConnectionSnapshotDeclaresExtension(const py::object &snapshot_obj, const string &extension_name) {
 	if (snapshot_obj.is_none() || !py::isinstance<py::dict>(snapshot_obj)) {
 		return false;
 	}
@@ -1236,7 +1394,7 @@ static void ApplyConnectionSnapshot(py::object conn_obj, const py::object &snaps
 	if (!snapshot.contains(py::str("extensions")) || !py::isinstance<py::list>(snapshot[py::str("extensions")])) {
 		throw InvalidInputException("Connection snapshot extensions must be a list");
 	}
-	vector<StaticExtensionSnapshotEntry> extensions;
+	vector<ExtensionSnapshotEntry> extensions;
 	set<string> extension_names;
 	for (auto item : snapshot[py::str("extensions")].cast<py::list>()) {
 		if (!py::isinstance<py::dict>(item)) {
@@ -1248,11 +1406,49 @@ static void ApplyConnectionSnapshot(py::object conn_obj, const py::object &snaps
 		    !py::isinstance<py::str>(extension_obj[py::str("version")])) {
 			throw InvalidInputException("Connection snapshot extension entry is missing string name or version");
 		}
-		StaticExtensionSnapshotEntry extension;
+		ExtensionSnapshotEntry extension;
 		extension.name = extension_obj[py::str("name")].cast<string>();
 		extension.version = extension_obj[py::str("version")].cast<string>();
-		if (extension.name.empty() || !extension_names.insert(extension.name).second) {
+		auto mode_key = py::str("mode");
+		if (extension_obj.contains(mode_key)) {
+			if (!py::isinstance<py::str>(extension_obj[mode_key])) {
+				throw InvalidInputException("Connection snapshot extension mode must be a string");
+			}
+			extension.mode = extension_obj[mode_key].cast<string>();
+		} else {
+			// Snapshots produced before loadable extensions were supported contain
+			// only name/version and therefore unambiguously describe static entries.
+			extension.mode = STATIC_EXTENSION_MODE;
+		}
+		auto path_key = py::str("path");
+		if (extension_obj.contains(path_key)) {
+			if (!py::isinstance<py::str>(extension_obj[path_key])) {
+				throw InvalidInputException("Connection snapshot extension path must be a string");
+			}
+			extension.path = extension_obj[path_key].cast<string>();
+		}
+		auto sha256_key = py::str("sha256");
+		if (extension_obj.contains(sha256_key)) {
+			if (!py::isinstance<py::str>(extension_obj[sha256_key])) {
+				throw InvalidInputException("Connection snapshot extension sha256 must be a string");
+			}
+			extension.sha256 = extension_obj[sha256_key].cast<string>();
+		}
+		auto normalized_name = StringUtil::Lower(extension.name);
+		if (extension.name.empty() || !extension_names.insert(normalized_name).second) {
 			throw InvalidInputException("Connection snapshot has an empty or duplicate extension name");
+		}
+		if (extension.mode == STATIC_EXTENSION_MODE) {
+			if (!extension.path.empty() || !extension.sha256.empty()) {
+				throw InvalidInputException("Static connection snapshot extension must not declare path or sha256");
+			}
+		} else if (extension.mode == LOADABLE_EXTENSION_MODE) {
+			if (extension.path.empty() || !IsLowerHexSHA256(extension.sha256)) {
+				throw InvalidInputException(
+				    "Loadable connection snapshot extension requires an absolute path and lowercase SHA-256");
+			}
+		} else {
+			throw InvalidInputException("Connection snapshot extension has unsupported mode '%s'", extension.mode);
 		}
 		extensions.push_back(std::move(extension));
 	}
@@ -1268,9 +1464,7 @@ static void ApplyConnectionSnapshot(py::object conn_obj, const py::object &snaps
 		// runtime downloads or unsigned extension binaries.
 		EnforceExtensionSecuritySettings(conn);
 	}
-	LoadStaticRayExtensions(conn, extensions);
-	DistributedExtensionManager::Get(DatabaseInstance::GetDatabase(*conn.context))
-	    .ValidateExact(distributed_extension_contracts);
+	ValidateRayExtensionSnapshot(conn, extensions, distributed_extension_contracts);
 
 	if (options.apply_session_config) {
 		ApplyVaneSessionConfig(conn, snapshot_obj);

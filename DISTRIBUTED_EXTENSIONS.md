@@ -2,8 +2,8 @@
 
 ## Scope
 
-This document defines the explicit contracts that let a statically linked
-DuckDB extension participate in Vane's Ray distributed execution. The engine
+This document defines the explicit contracts that let a DuckDB extension
+participate in Vane's Ray distributed execution. The engine
 owns scheduling, transport, and the coordinator transaction boundary; each
 extension continues to own its bind state, scan semantics, artifact production,
 and catalog mutation logic.
@@ -23,8 +23,9 @@ when it runs through DuckDB's native runner.
 
 ## Design rules
 
-- Extensions used by Ray are pinned, reviewed, and statically linked into the
-  Vane release artifact.
+- Extensions used by Ray are either part of Vane's static extension set or are
+  independently built, reviewed loadable artifacts pre-provisioned on every
+  worker with the same absolute path and bytes.
 - The coordinator resolves catalog state and selects immutable work before
   worker execution starts.
 - Workers receive portable split data and restore extension state through the
@@ -76,8 +77,8 @@ accepts only implemented hook kinds: distributed table scans and distributed
 write operators. It has no public placeholder API for hypothetical aggregate,
 COPY, storage, or context protocols.
 
-Ordinary DuckDB registrations remain available on every statically linked
-worker:
+Ordinary DuckDB registrations remain available after the exact extension is
+loaded on every worker:
 
 - ordinary worker-safe scalar functions, types, casts, and collations use their
   normal DuckDB registrations after the exact extension is loaded;
@@ -108,16 +109,35 @@ method, matching DuckDB's `OperatorExtension`, `ParserExtension`,
 ## Build and loading
 
 The connection snapshot records the content-derived DuckDB `SourceID`, every
-loaded static extension name and exact extension version, and a sorted list of
-canonical distributed contract identities. A worker first validates its
-`SourceID`, invokes DuckDB's generated static loader, compares the loaded
-extension identities, and then compares the registered contracts before
-deserializing a plan. Dynamically
-installed extension binaries are not accepted by distributed execution.
+loaded extension name and exact extension version, and a sorted list of
+canonical distributed contract identities. Static entries are loaded through
+DuckDB's generated static loader. A loadable entry additionally records its
+canonical local path and SHA-256 digest. The worker reads only that
+pre-provisioned path, verifies the digest before and after loading, and then
+compares the complete loaded-extension and distributed-contract identities
+before deserializing a plan.
 
-The snapshot schema is strict. Legacy name-only extension lists, absent
-contract data, extra worker contracts, and any protocol mismatch are rejected.
-This validation occurs before task scheduling.
+Vane never downloads, installs, updates, or copies an extension during Ray
+execution. Auto-install, auto-load, and unsigned-extension settings are forced
+off during snapshot replay. Consequently, a production loadable artifact must
+be signed for the matching Vane DuckDB ABI and must already exist at the same
+absolute path in every worker image or shared filesystem. Official-DuckDB and
+Vane artifacts are different ABI products even when built from the same
+extension source revision.
+
+The first successful replay stores the verified extension identities in the
+worker DatabaseInstance's generic object cache. Later task cursors compare the
+loaded extension metadata and distributed contracts without hashing the same
+large immutable artifact again. Extension loading is monotonic: a later source
+snapshot may add an extension, but it cannot change or omit a binary already
+verified in that DatabaseInstance. The worker database cache key includes the
+loadable mode, path, and digest, so a different artifact is assigned a different
+DatabaseInstance.
+
+The snapshot schema is strict. Legacy name/version entries are interpreted as
+static entries for compatibility; loadable entries without a canonical path
+and lowercase SHA-256, absent contract data, extra worker contracts, and any
+version or digest mismatch are rejected before split scheduling.
 
 The snapshot also carries declarations of attached catalogs needed to plan a
 transported logical plan. Transported logical plans use an isolated planning
@@ -172,7 +192,7 @@ IcebergCreateWorkerBind(const TableFunctionDistributedScanInput &input) {
 }
 ```
 
-After loading the required static extension, each worker resolves the normal
+After loading the required extension, each worker resolves the normal
 DuckDB table function from its catalog and calls its `deserialize` callback.
 The worker never invokes the original bind callback and never repeats catalog or
 metadata planning. Missing or incomplete bind serde is a hard error.
@@ -421,7 +441,7 @@ For every distributed write provider:
 
 - return a `DistributedExtensionWritePlan` containing the exact registered
   extension/operator key and portable dynamic worker bind bytes;
-- register the mode, protocol, codec, and callbacks once in the static
+- register the mode, protocol, codec, and callbacks once in the extension's
   `DistributedWriteOperatorExtension`; do not duplicate them in the physical
   provider;
 - keep `ValidateDistributedWrite` read-only and limit it to catalog and output
@@ -455,9 +475,11 @@ distributed tests before an extension is enabled in release builds.
 
 ## Failure rules
 
-- Unknown or non-static extension names in a connection snapshot are rejected.
-- DuckDB source, static extension version, and distributed contract mismatches
-  are rejected before planning or scheduling.
+- Unknown snapshot modes, missing loadable artifacts, digest changes, and
+  unsigned loadable artifacts are rejected; no runtime installation fallback is
+  attempted.
+- DuckDB source, extension version/artifact identity, and distributed contract
+  mismatches are rejected before planning or scheduling.
 - A callback/provider whose capability identity was not registered is rejected
   before split enumeration or write validation.
 - Worker rebind is not supported for distributed table functions.

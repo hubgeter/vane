@@ -1,3 +1,9 @@
+// SPDX-FileCopyrightText: 2018-2025 Stichting DuckDB Foundation
+// SPDX-FileCopyrightText: 2026 Vane contributors
+// SPDX-License-Identifier: MIT
+//
+// Modified by Vane contributors.
+
 #include "duckdb/catalog/catalog_set.hpp"
 
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
@@ -762,6 +768,13 @@ void CatalogSet::Scan(const std::function<void(CatalogEntry &)> &callback) {
 void CatalogSet::SetDefaultGenerator(unique_ptr<DefaultGenerator> defaults_p) {
 	lock_guard<mutex> lock(catalog_lock);
 	defaults = std::move(defaults_p);
+}
+
+void CatalogSet::InvalidateDefaultEntries() {
+	lock_guard<mutex> lock(catalog_lock);
+	if (defaults) {
+		defaults->created_all_entries = false;
+	}
 }
 
 void CatalogSet::Verify(Catalog &catalog_p) {

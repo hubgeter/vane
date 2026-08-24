@@ -1,3 +1,9 @@
+// SPDX-FileCopyrightText: 2018-2025 Stichting DuckDB Foundation
+// SPDX-FileCopyrightText: 2026 Vane contributors
+// SPDX-License-Identifier: MIT
+//
+// Modified by Vane contributors.
+
 //===----------------------------------------------------------------------===//
 //                         DuckDB
 //
@@ -133,6 +139,11 @@ public:
 
 	//! Override the default generator - this should not be used after the catalog set has been used
 	void SetDefaultGenerator(unique_ptr<DefaultGenerator> defaults);
+	//! Mark externally generated entries stale so the next lookup/scan
+	//! re-enumerates the backing namespace.  Distributed writers can commit
+	//! outside this DatabaseInstance, so keeping the one-time enumeration flag
+	//! set would hide tables created by another coordinator.
+	DUCKDB_API void InvalidateDefaultEntries();
 
 private:
 	bool DropDependencies(CatalogTransaction transaction, const string &name, bool cascade,

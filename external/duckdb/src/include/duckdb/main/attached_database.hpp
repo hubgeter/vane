@@ -1,3 +1,9 @@
+// SPDX-FileCopyrightText: 2018-2025 Stichting DuckDB Foundation
+// SPDX-FileCopyrightText: 2026 Vane contributors
+// SPDX-License-Identifier: MIT
+//
+// Modified by Vane contributors.
+
 //===----------------------------------------------------------------------===//
 //                         DuckDB
 //
@@ -144,6 +150,17 @@ public:
 	const unordered_map<string, Value> &GetAttachOptions() const {
 		return attach_options;
 	}
+	//! Return the storage type requested by ATTACH for an extension-backed catalog.
+	//! This is distinct from Catalog::GetCatalogType(), which describes the
+	//! catalog implementation and may be "duckdb" for extension-backed catalogs.
+	const string &GetDatabaseType() const {
+		return db_type;
+	}
+	//! Return the path/URI supplied to ATTACH before a storage extension
+	//! normalizes it for its internal catalog implementation.
+	const string &GetAttachPath() const {
+		return attach_path;
+	}
 	string StoredPath() const;
 
 	static bool NameIsReserved(const string &name);
@@ -162,6 +179,8 @@ private:
 	AttachedDatabaseType type;
 	optional_ptr<Catalog> parent_catalog;
 	optional_ptr<StorageExtension> storage_extension;
+	string attach_path;
+	string db_type;
 	RecoveryMode recovery_mode = RecoveryMode::DEFAULT;
 	AttachVisibility visibility = AttachVisibility::SHOWN;
 	bool is_initial_database = false;

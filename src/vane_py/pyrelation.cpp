@@ -22,6 +22,11 @@
 #include "duckdb/common/types/column/column_data_collection.hpp"
 #include "duckdb/main/query_result.hpp"
 #include "duckdb/main/materialized_query_result.hpp"
+#include "duckdb/main/database_manager.hpp"
+#include "duckdb/main/attached_database.hpp"
+#include "duckdb/catalog/duck_catalog.hpp"
+#include "duckdb/catalog/catalog_entry/duck_schema_entry.hpp"
+#include "duckdb/catalog/catalog_set.hpp"
 #include "duckdb/parallel/task_scheduler.hpp"
 #include "duckdb/parser/statement/explain_statement.hpp"
 #include "duckdb/catalog/default/default_types.hpp"
@@ -1176,6 +1181,42 @@ static bool TryDispatchToRunner(const shared_ptr<Relation> &write_rel, const py:
 	py_write_rel.SetConnectionOwner(connection_owner);
 	auto py_write_rel_obj = py::cast(std::move(py_write_rel));
 	runner_for_db.runner.attr("run_write")(py_write_rel_obj);
+	// The distributed coordinator plans against a replay connection.  A
+	// successful CTAS can therefore create a table in that connection's
+	// external namespace while the caller's DatabaseInstance still has its
+	// one-time default-generator enumeration marked complete.  Invalidate the
+	// generic DuckDB catalog-set flag after the write so the caller observes
+	// tables committed by another process/coordinator.
+	if (connection_owner && !connection_owner.is_none() && py::isinstance<DuckDBPyConnection>(connection_owner)) {
+		try {
+			auto &owner = connection_owner.cast<DuckDBPyConnection &>();
+			auto context = owner.con.GetConnection().context;
+			if (context) {
+				auto databases = DatabaseManager::Get(*context).GetDatabases();
+				for (auto &database : databases) {
+					if (database->IsSystem() || database->IsTemporary() || database->IsInitialDatabase() ||
+					    database->GetVisibility() == AttachVisibility::HIDDEN) {
+						continue;
+					}
+					auto *duck_catalog = dynamic_cast<DuckCatalog *>(&database->GetCatalog());
+					if (!duck_catalog) {
+						continue;
+					}
+					duck_catalog->ScanSchemas([&](SchemaCatalogEntry &schema) {
+						auto *duck_schema = dynamic_cast<DuckSchemaEntry *>(&schema);
+						if (!duck_schema) {
+							return;
+						}
+						duck_schema->GetCatalogSet(CatalogType::TABLE_ENTRY).InvalidateDefaultEntries();
+					});
+				}
+			}
+		} catch (...) {
+			// The write is already durable.  Catalog refresh is a local
+			// visibility optimization and must not turn a successful external
+			// commit into a retryable Python exception.
+		}
+	}
 	return true;
 }
 

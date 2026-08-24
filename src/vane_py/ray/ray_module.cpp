@@ -79,6 +79,7 @@ static inline int DuckdbGetEnvIntMs(const char *name) {
 #include <duckdb/main/attached_database.hpp>
 #include <duckdb/main/distributed_extension_manager.hpp>
 #include <duckdb/main/extension_helper.hpp>
+#include <duckdb/main/extension_manager.hpp>
 #include <duckdb/parser/keyword_helper.hpp>
 #include <duckdb/common/types/data_chunk.hpp>
 #include <duckdb/common/types/value.hpp>
@@ -88,6 +89,7 @@ static inline int DuckdbGetEnvIntMs(const char *name) {
 #include <duckdb/parallel/thread_context.hpp>
 #include <duckdb/parallel/task_scheduler.hpp>
 #include <duckdb/main/prepared_statement_data.hpp>
+#include <duckdb/storage/object_cache.hpp>
 #include <duckdb/execution/operator/helper/physical_materialized_collector.hpp>
 #include <duckdb/execution/operator/exchange/physical_remote_exchange_sink.hpp>
 #include <duckdb/execution/operator/exchange/physical_remote_exchange_source.hpp>
@@ -113,6 +115,7 @@ static inline int DuckdbGetEnvIntMs(const char *name) {
 #include <duckdb/common/string_util.hpp>
 #include <duckdb/execution/distributed/exchange/flight_exchange_manager.hpp>
 #include <duckdb/execution/distributed/exchange/shuffle_cache_registry.hpp>
+#include <mbedtls_wrapper.hpp>
 
 #include <cstdlib>
 #include <fstream>
@@ -298,7 +301,7 @@ static py::object ResolveFlightShuffleCleanupConnection(py::object cleanup_conne
 	snapshot_options.apply_s3_credentials = apply_snapshot_s3_credentials;
 	ValidateConnectionSnapshotExtensions(resolved_connection, connection_snapshot,
 	                                     snapshot_options.enforce_extension_security);
-	if (ConnectionSnapshotDeclaresStaticExtension(connection_snapshot, "httpfs")) {
+	if (ConnectionSnapshotDeclaresExtension(connection_snapshot, "httpfs")) {
 		ApplyEffectiveVaneSessionConfig(resolved_wrapper, effective_session_config);
 	}
 	ApplyConnectionSnapshot(resolved_connection, connection_snapshot, snapshot_options);
@@ -1639,7 +1642,7 @@ void register_ray_bindings(py::module_ &mod) {
 				        // full snapshot only after the environment/profile baseline so
 				        // explicit source-connection settings retain normal precedence.
 				        ValidateConnectionSnapshotExtensions(exec_conn, plan.connection_snapshot_, true);
-				        if (ConnectionSnapshotDeclaresStaticExtension(plan.connection_snapshot_, "httpfs")) {
+				        if (ConnectionSnapshotDeclaresExtension(plan.connection_snapshot_, "httpfs")) {
 					        ApplyEffectiveVaneSessionConfig(ExtractPyConnectionWrapper(exec_conn),
 					                                        effective_session_config_obj);
 				        }

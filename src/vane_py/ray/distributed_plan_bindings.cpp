@@ -1089,7 +1089,7 @@ PyPhysicalPlanWrapper PyLogicalPlan::to_physical_plan(py::object conn_obj, py::o
 	// declare httpfs must leave the planning DatabaseInstance uncontaminated.
 	ValidateConnectionSnapshotExtensions(planning_conn, connection_snapshot_,
 	                                     snapshot_options.enforce_extension_security);
-	if (ConnectionSnapshotDeclaresStaticExtension(connection_snapshot_, "httpfs")) {
+	if (ConnectionSnapshotDeclaresExtension(connection_snapshot_, "httpfs")) {
 		// Resolved environment/profile credentials are the session baseline.
 		// Replay the source connection below so explicit source SET values retain
 		// DuckDB's normal precedence.

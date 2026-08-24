@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import gc
+import hashlib
 import pickle
 import threading
 
@@ -785,7 +786,7 @@ def test_connection_snapshot_captures_exact_extension_contract():
 
     assert snapshot["duckdb_source_id"]
     assert isinstance(snapshot["extensions"], list)
-    assert all(set(extension) >= {"name", "version"} for extension in snapshot["extensions"])
+    assert all(set(extension) >= {"name", "version", "mode", "path", "sha256"} for extension in snapshot["extensions"])
     assert snapshot["distributed_extension_contracts"] == [
         "vane_core{table_function:datasource_scan(POINTER, POINTER, BLOB, BLOB[])@1,"
         "table_function:generate_series(BIGINT)@1,"
@@ -838,7 +839,7 @@ def test_snapshot_replay_rejects_different_static_extension_version():
 
     replay_plan = ray_cxx.DistributedPhysicalPlan.__new__(ray_cxx.DistributedPhysicalPlan)
     replay_plan.__setstate__(tuple(state))
-    with pytest.raises(Exception, match="Static extension identities differ"):
+    with pytest.raises(Exception, match="Extension identities differ"):
         ray_cxx.DistributedPhysicalPlanRunner().execute_native(vane.connect().cursor(), replay_plan)
 
 
@@ -972,7 +973,7 @@ def test_snapshot_replay_rejects_legacy_extension_name_list():
         ray_cxx.DistributedPhysicalPlanRunner().execute_native(vane.connect().cursor(), replay_plan)
 
 
-def test_snapshot_replay_rejects_non_static_extensions_without_installing(tmp_path):
+def test_snapshot_replay_rejects_missing_static_extensions_without_installing(tmp_path):
     ray_cxx = _require_ray_cxx()
 
     source_conn = vane.connect()
@@ -1006,10 +1007,43 @@ def test_snapshot_replay_rejects_non_static_extensions_without_installing(tmp_pa
         )
 
     message = str(exc_info.value)
-    assert "supports only statically linked extensions" in message
+    assert "not statically linked into this worker" in message
     assert "sqlite_scanner" in message
     assert "Failed to download extension" not in message
     assert not extension_directory.exists()
+
+
+def test_snapshot_replay_rejects_changed_preprovisioned_loadable_extension(tmp_path):
+    ray_cxx = _require_ray_cxx()
+
+    source_conn = vane.connect()
+    logical_plan = ray_cxx.PyLogicalPlan.from_duckdb_relation(
+        source_conn.sql("SELECT 1"),
+        "snapshot-loadable-extension-digest",
+    )
+    physical_plan = logical_plan.to_physical_plan(vane.connect())
+    state = list(physical_plan.__getstate__())
+    snapshot = dict(state[6])
+    artifact = (tmp_path / "custom.duckdb_extension").resolve()
+    artifact.write_bytes(b"pre-provisioned extension bytes")
+    expected_digest = hashlib.sha256(artifact.read_bytes()).hexdigest()
+    snapshot["extensions"] = [
+        {
+            "name": "custom",
+            "version": "test-version",
+            "mode": "LOADABLE",
+            "path": str(artifact),
+            "sha256": expected_digest,
+        }
+    ]
+    artifact.write_bytes(b"changed after coordinator snapshot")
+    state[6] = snapshot
+
+    replay_plan = ray_cxx.DistributedPhysicalPlan.__new__(ray_cxx.DistributedPhysicalPlan)
+    replay_plan.__setstate__(tuple(state))
+
+    with pytest.raises(Exception, match="artifact SHA-256 differs between coordinator and worker"):
+        ray_cxx.DistributedPhysicalPlanRunner().execute_native(vane.connect().cursor(), replay_plan)
 
 
 def test_snapshot_bootstrap_is_sanitized_before_connect(tmp_path):
@@ -1319,7 +1353,7 @@ def test_effective_session_config_does_not_load_undeclared_httpfs():
     replay_logical_plan.__setstate__(tuple(state))
 
     planning_conn = vane.connect()
-    with pytest.raises(Exception, match="Static extension identities differ"):
+    with pytest.raises(Exception, match="Extension identities differ"):
         replay_logical_plan.to_physical_plan(
             planning_conn,
             effective_session_config={

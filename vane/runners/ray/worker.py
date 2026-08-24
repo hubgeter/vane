@@ -9,6 +9,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -258,15 +259,15 @@ class WorkerSnapshotDatabaseIdentity(NamedTuple):
     config: tuple[tuple[str, str], ...]
     settings: tuple[tuple[str, str, str], ...]
     duckdb_source_id: str
-    extensions: tuple[tuple[str, str], ...]
+    extensions: tuple[tuple[str, str, str, str, str], ...]
     distributed_extension_contracts: tuple[str, ...]
     s3_session_id: str
     effective_s3_config_identity: str
     use_session_credentials: bool
 
-    def has_static_extension(self, extension_name: str) -> bool:
+    def has_extension(self, extension_name: str) -> bool:
         normalized_name = str(extension_name).lower()
-        return any(name.lower() == normalized_name for name, _version in self.extensions)
+        return any(extension[0].lower() == normalized_name for extension in self.extensions)
 
     def replaces_s3_identity(self, other: WorkerSnapshotDatabaseIdentity) -> bool:
         if not self.s3_session_id or self == other:
@@ -355,7 +356,7 @@ def _worker_snapshot_database_identity(
     raw_extensions = snapshot.get("extensions")
     if not isinstance(raw_extensions, list):
         raise TypeError("query connection snapshot extensions must be a list")
-    extensions: list[tuple[str, str]] = []
+    extensions: list[tuple[str, str, str, str, str]] = []
     extension_names: set[str] = set()
     for raw_extension in raw_extensions:
         if not isinstance(raw_extension, Mapping):
@@ -364,10 +365,25 @@ def _worker_snapshot_database_identity(
         version = raw_extension.get("version")
         if not isinstance(version, str):
             raise TypeError("query connection snapshot extension version must be a string")
-        if name in extension_names:
+        normalized_name = name.lower()
+        if normalized_name in extension_names:
             raise ValueError(f"query connection snapshot has duplicate extension name: {name}")
-        extension_names.add(name)
-        extensions.append((name, version))
+        extension_names.add(normalized_name)
+        mode = raw_extension.get("mode", "STATICALLY_LINKED")
+        if mode not in {"STATICALLY_LINKED", "LOADABLE"}:
+            raise ValueError(f"query connection snapshot extension mode is unsupported: {mode!r}")
+        path = raw_extension.get("path", "")
+        sha256 = raw_extension.get("sha256", "")
+        if not isinstance(path, str):
+            raise TypeError("query connection snapshot extension path must be a string")
+        if not isinstance(sha256, str):
+            raise TypeError("query connection snapshot extension sha256 must be a string")
+        if mode == "STATICALLY_LINKED":
+            if path or sha256:
+                raise ValueError("query connection snapshot static extension must not declare path or sha256")
+        elif not path or re.fullmatch(r"[0-9a-f]{64}", sha256) is None:
+            raise ValueError("query connection snapshot loadable extension requires a path and lowercase SHA-256")
+        extensions.append((name, version, mode, path, sha256))
     extensions.sort()
 
     raw_distributed_contracts = snapshot.get("distributed_extension_contracts")
@@ -383,7 +399,7 @@ def _worker_snapshot_database_identity(
         seen_distributed_contracts.add(raw_contract)
         distributed_contracts.append(raw_contract)
     distributed_contracts.sort()
-    has_httpfs = any(name.lower() == "httpfs" for name, _version in extensions)
+    has_httpfs = any(extension[0].lower() == "httpfs" for extension in extensions)
     if has_httpfs:
         s3_session_id = str(session_id).strip()
         if not s3_session_id:
@@ -2069,7 +2085,7 @@ class RayWorkerActor:
                 database_identity=database_identity,
             )
         try:
-            if database_identity.has_static_extension("httpfs"):
+            if database_identity.has_extension("httpfs"):
                 _configure_duckdb_s3(
                     cleanup_cursor,
                     effective_s3_config,
@@ -2620,7 +2636,7 @@ class RayWorkerActor:
                 if self._worker_native_query_is_closing(native_query_id):
                     raise RuntimeError(f"native query is closing: {native_query_id}")
                 raise RuntimeError(f"native task is closing: {native_task_id}")
-            if database_identity.has_static_extension("httpfs"):
+            if database_identity.has_extension("httpfs"):
                 effective_s3_config = _configure_duckdb_s3(
                     cursor,
                     effective_s3_config,

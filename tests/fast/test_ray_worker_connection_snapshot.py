@@ -606,11 +606,62 @@ def test_worker_snapshot_database_identity_omits_s3_state_without_httpfs():
             },
             "duplicate extension name",
         ),
+        (
+            {
+                "duckdb_source_id": "test-source-id",
+                "extensions": [
+                    {"name": "httpfs", "version": "test-version"},
+                    {"name": "HTTPFS", "version": "test-version"},
+                ],
+                "distributed_extension_contracts": [],
+                "settings": [],
+            },
+            "duplicate extension name",
+        ),
+        (
+            {
+                "duckdb_source_id": "test-source-id",
+                "extensions": [{"name": "custom", "version": "1", "mode": "LOADABLE", "path": "/ext"}],
+                "distributed_extension_contracts": [],
+                "settings": [],
+            },
+            "requires a path and lowercase SHA-256",
+        ),
     ],
 )
 def test_worker_snapshot_database_identity_rejects_ambiguous_contract(snapshot, message):
     with pytest.raises((TypeError, ValueError), match=message):
         _snapshot_database_identity(snapshot)
+
+
+def test_worker_snapshot_database_identity_includes_loadable_artifact_identity():
+    snapshot = {
+        "duckdb_source_id": "test-source-id",
+        "extensions": [
+            {
+                "name": "custom",
+                "version": "1.2.3",
+                "mode": "LOADABLE",
+                "path": "/opt/vane/extensions/custom.duckdb_extension",
+                "sha256": "a" * 64,
+            }
+        ],
+        "distributed_extension_contracts": [],
+        "settings": [],
+    }
+
+    identity = _snapshot_database_identity(snapshot)
+
+    assert identity.extensions == (
+        (
+            "custom",
+            "1.2.3",
+            "LOADABLE",
+            "/opt/vane/extensions/custom.duckdb_extension",
+            "a" * 64,
+        ),
+    )
+    assert identity.has_extension("CUSTOM") is True
 
 
 def test_worker_snapshot_cursor_reserves_shutdown_fence_before_cursor_creation(monkeypatch):
